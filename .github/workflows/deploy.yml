@@ -1,0 +1,64 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # Версия Quartz закреплена коммитом ветки v4 — обновляй осознанно
+  QUARTZ_REF: d25a6eabf96751ffca56f8a8139272def7a65041
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch Quartz
+        run: |
+          git clone https://github.com/jackyzha0/quartz.git "$RUNNER_TEMP/quartz"
+          git -C "$RUNNER_TEMP/quartz" checkout "$QUARTZ_REF"
+
+      - name: Assemble site
+        run: |
+          cp site/quartz.config.ts "$RUNNER_TEMP/quartz/quartz.config.ts"
+          rm -rf "$RUNNER_TEMP/quartz/content"
+          mkdir "$RUNNER_TEMP/quartz/content"
+          cp ./*.md "$RUNNER_TEMP/quartz/content/"
+          rm -f "$RUNNER_TEMP/quartz/content/README.md"
+
+      - name: Build
+        working-directory: ${{ runner.temp }}/quartz
+        run: |
+          npm ci
+          npx quartz build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/quartz/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
