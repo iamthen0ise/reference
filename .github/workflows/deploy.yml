@@ -35,7 +35,8 @@ jobs:
 
       - name: Assemble site
         run: |
-          cp site/quartz.config.ts "$RUNNER_TEMP/quartz/quartz.config.ts"
+          cp site/quartz.config.ts site/quartz.layout.ts "$RUNNER_TEMP/quartz/"
+          cp site/custom.scss "$RUNNER_TEMP/quartz/quartz/styles/custom.scss"
           rm -rf "$RUNNER_TEMP/quartz/content"
           mkdir "$RUNNER_TEMP/quartz/content"
           cp ./*.md "$RUNNER_TEMP/quartz/content/"
