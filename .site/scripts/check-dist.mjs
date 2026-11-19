@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { countVault } from './check-vault.mjs';
 
 const SKIP_DIRS = new Set(['_astro', 'pagefind']);
 const SKIP_HREF = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i; // http(s):, mailto:, tel:, data:, //host
@@ -51,6 +52,19 @@ function parsePage(html) {
     hrefs.push(decodeEntities(m[1] ?? m[2]));
   }
   return { ids, hrefs };
+}
+
+// Ссылки бокового меню Starlight (<nav class="sidebar">) -> ключи страниц ("notes/a/b").
+function sidebarKeys(html, base_) {
+  const m = /<nav\b[^>]*\sclass\s*=\s*"(?:[^"]*\s)?sidebar(?:\s[^"]*)?"[^>]*>([\s\S]*?)<\/nav>/i.exec(html);
+  if (!m) return null;
+  const keys = new Set();
+  for (const h of parsePage(m[1]).hrefs) {
+    const path = decode(h.split('#')[0].split('?')[0]);
+    if (path !== base_ && !path.startsWith(base_ + '/')) continue;
+    keys.add(posix.normalize(path.slice(base_.length) || '/').replace(/^\/+|\/+$/g, ''));
+  }
+  return keys;
 }
 
 const count = (html, re) => [...html.matchAll(re)].length;
@@ -147,26 +161,52 @@ export async function checkDist(distDir, { base, mermaid, asides }) {
     asideCount += count(html, /<aside\b[^>]*\sclass\s*=\s*"(?:[^"]*\s)?starlight-aside(?:\s[^"]*)?"/gi);
   }
 
+  // Меню в astro.config.mjs написано вручную: новая заметка, не попавшая в него, недоступна из навигации.
+  if (pages.has('notes')) {
+    const keys = sidebarKeys(htmls.get(join(root, 'notes', 'index.html')), base_);
+    const notePages = [...pages.keys()].filter((k) => k.startsWith('notes/'));
+    if (keys === null) {
+      if (notePages.length) problems.push('notes/index.html: sidebar navigation not found');
+    } else {
+      for (const k of notePages) {
+        if (!keys.has(k)) problems.push(`${k}/: not linked from the sidebar (add it to the sidebar in .site/astro.config.mjs)`);
+      }
+    }
+  }
+
   if (mermaidCount !== mermaid) problems.push(`mermaid blocks: expected ${mermaid}, got ${mermaidCount}`);
   if (asideCount !== asides) problems.push(`asides: expected ${asides}, got ${asideCount}`);
   return problems;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2);
+// Разбор аргументов CLI. Ожидаемые числа: явные --mermaid/--asides или из vault (--vault <dir>); иначе null (usage).
+export async function resolveOptions(args) {
   const opt = (name) => {
     const i = args.indexOf(name);
     return i < 0 ? undefined : args[i + 1];
   };
   const dir = args[0];
   const base = opt('--base');
-  const mermaid = Number(opt('--mermaid'));
-  const asides = Number(opt('--asides'));
-  if (!dir || dir.startsWith('--') || base === undefined || Number.isNaN(mermaid) || Number.isNaN(asides)) {
-    console.error('usage: check-dist.mjs <distDir> --base /reference --mermaid N --asides N');
+  if (!dir || dir.startsWith('--') || base === undefined) return null;
+  let mermaid = opt('--mermaid') === undefined ? undefined : Number(opt('--mermaid'));
+  let asides = opt('--asides') === undefined ? undefined : Number(opt('--asides'));
+  const vault = opt('--vault');
+  if (vault !== undefined && (mermaid === undefined || asides === undefined)) {
+    const counted = await countVault(vault);
+    mermaid ??= counted.mermaid;
+    asides ??= counted.asides;
+  }
+  if (mermaid === undefined || asides === undefined || Number.isNaN(mermaid) || Number.isNaN(asides)) return null;
+  return { dir, base, mermaid, asides };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const o = await resolveOptions(process.argv.slice(2));
+  if (!o) {
+    console.error('usage: check-dist.mjs <distDir> --base /reference (--vault <vaultDir> | --mermaid N --asides N)');
     process.exit(2);
   }
-  const problems = await checkDist(dir, { base, mermaid, asides });
+  const problems = await checkDist(o.dir, o);
   for (const p of problems) console.log(p);
   process.exit(problems.length ? 1 : 0);
 }

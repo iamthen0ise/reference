@@ -2,24 +2,24 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const IGNORED_DIRS = new Set(['docs', 'node_modules']);
-const IGNORED_FILES = new Set(['README.md']);
+import { isIgnoredDir, isIgnoredFile } from './vault-ignore.mjs';
 
-async function listNotes(root, dir = root) {
+export async function listNotes(root, dir = root) {
   const out = [];
+  const atRoot = dir === root;
   for (const e of await readdir(dir, { withFileTypes: true })) {
     if (e.isDirectory()) {
-      if (e.name.startsWith('.') || IGNORED_DIRS.has(e.name)) continue;
+      if (isIgnoredDir(e.name, atRoot)) continue;
       out.push(...(await listNotes(root, join(dir, e.name))));
-    } else if (e.isFile() && e.name.endsWith('.md') && !IGNORED_FILES.has(e.name)) {
+    } else if (e.isFile() && e.name.endsWith('.md') && !isIgnoredFile(e.name, atRoot)) {
       out.push(join(dir, e.name));
     }
   }
   return out;
 }
 
-// Returns text lines with frontmatter and fenced code blanked out.
-function proseLines(text) {
+// Returns text lines with frontmatter and fenced code removed, and the info strings of the fences opened.
+function scan(text) {
   const lines = text.split(/\r?\n/);
   let i = 0;
   if (lines[0] === '---') {
@@ -27,10 +27,11 @@ function proseLines(text) {
     if (end > 0) i = end + 1;
   }
   const out = [];
+  const fences = [];
   let fence = null;
   for (; i < lines.length; i++) {
     const line = lines[i];
-    const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    const m = /^[ \t]*(`{3,}|~{3,})/.exec(line); // отступ любой: блоки внутри списков
     if (fence) {
       if (m && m[1][0] === fence.char && m[1].length >= fence.len && /^\s*$/.test(line.slice(m[0].length))) {
         fence = null;
@@ -39,12 +40,15 @@ function proseLines(text) {
     }
     if (m) {
       fence = { char: m[1][0], len: m[1].length };
+      fences.push(line.slice(m[0].length).trim());
       continue;
     }
     out.push(line);
   }
-  return out;
+  return { lines: out, fences };
 }
+
+const proseLines = (text) => scan(text).lines;
 
 const stripInlineCode = (line) => line.replace(/(`+)[^`]*?\1/g, '');
 
@@ -57,6 +61,18 @@ function parse(text) {
     for (const m of stripInlineCode(line).matchAll(/\[\[([^\]]+)\]\]/g)) links.push(m[1]);
   }
   return { headings, links };
+}
+
+// Ожидаемые числа для check-dist: диаграммы mermaid и callout-блоки `> [!type]` вне других код-блоков.
+export async function countVault(vaultDir) {
+  let mermaid = 0;
+  let asides = 0;
+  for (const f of await listNotes(vaultDir)) {
+    const { lines, fences } = scan(await readFile(f, 'utf8'));
+    mermaid += fences.filter((info) => /^mermaid(?:\s|$)/.test(info)).length;
+    asides += lines.filter((l) => /^ {0,3}>\s*\[![A-Za-z][\w-]*\]/.test(l)).length;
+  }
+  return { mermaid, asides };
 }
 
 export async function checkVault(vaultDir) {

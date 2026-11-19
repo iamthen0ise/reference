@@ -4,7 +4,8 @@ import { cp, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkDist } from './check-dist.mjs';
+import { checkDist, resolveOptions } from './check-dist.mjs';
+import { mkdir } from 'node:fs/promises';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/dist/', import.meta.url));
 const OPTS = { base: '/reference', mermaid: 1, asides: 1 };
@@ -102,4 +103,52 @@ test('mermaid and aside counts enforced', async () => {
   assert.equal(p.length, 2);
   assert.ok(p.some((x) => /mermaid/.test(x) && /32/.test(x) && /1/.test(x)));
   assert.ok(p.some((x) => /aside/.test(x) && /30/.test(x) && /1/.test(x)));
+});
+
+const sidebarPage = (...hrefs) =>
+  '<!doctype html><html><body><nav class="sidebar print:hidden" aria-label="Основное"><ul>' +
+  hrefs.map((h) => `<li><a href="${h}">x</a></li>`).join('') +
+  '</ul></nav><main><h1>t</h1></main></body></html>';
+
+async function withNotes(sidebarHrefs, notePages) {
+  const dir = await copy();
+  await mkdir(join(dir, 'notes'), { recursive: true });
+  await writeFile(join(dir, 'notes/index.html'), sidebarPage(...sidebarHrefs));
+  for (const n of notePages) {
+    await mkdir(join(dir, 'notes', n), { recursive: true });
+    await writeFile(join(dir, 'notes', n, 'index.html'), '<!doctype html><html><body><h1>n</h1></body></html>');
+  }
+  return dir;
+}
+
+test('every notes page linked from the sidebar passes', async () => {
+  const dir = await withNotes(['/reference/notes/', '/reference/notes/%D0%B0/', '/reference/notes/b/'], ['а', 'b']);
+  assert.deepEqual(await checkDist(dir, OPTS), []);
+});
+
+test('notes page missing from the sidebar reported', async () => {
+  const dir = await withNotes(['/reference/notes/', '/reference/notes/a/'], ['a', 'new-note']);
+  const p = await checkDist(dir, OPTS);
+  assert.equal(p.length, 1);
+  assert.match(p[0], /new-note/);
+  assert.match(p[0], /sidebar/);
+});
+
+test('links outside the sidebar do not count', async () => {
+  const dir = await withNotes(['/reference/notes/'], ['a']);
+  await writeFile(join(dir, 'notes/index.html'), sidebarPage('/reference/notes/').replace('</main>', '<a href="/reference/notes/a/">a</a></main>'));
+  assert.match((await checkDist(dir, OPTS)).join('\n'), /notes\/a/);
+});
+
+test('resolveOptions: --vault derives expected counts from the vault', async () => {
+  const vault = await mkdtemp(join(tmpdir(), 'vault-'));
+  await writeFile(join(vault, 'A.md'), '```mermaid\ng\n```\n> [!note] x\n> [!tip] y\n');
+  const o = await resolveOptions(['dist', '--base', '/reference', '--vault', vault]);
+  assert.deepEqual(o, { dir: 'dist', base: '/reference', mermaid: 1, asides: 2 });
+});
+
+test('resolveOptions: explicit counts, and missing counts is an error', async () => {
+  const o = await resolveOptions(['dist', '--base', '/reference', '--mermaid', '3', '--asides', '4']);
+  assert.deepEqual(o, { dir: 'dist', base: '/reference', mermaid: 3, asides: 4 });
+  assert.equal(await resolveOptions(['dist', '--base', '/reference']), null);
 });

@@ -2,6 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightObsidian from 'starlight-obsidian';
 import { satteri } from '@astrojs/markdown-satteri';
+import { STARLIGHT_IGNORE } from './scripts/vault-ignore.mjs';
 import rehypeBaseLinks from './src/plugins/rehype-base-links.mjs';
 
 const base = '/reference';
@@ -99,7 +100,8 @@ export default defineConfig({
           configFolder: '.site/vault-config',
           // Заголовок из frontmatter (title: Reference у главной), а не имя файла.
           copyFrontmatter: 'starlight',
-          ignore: ['.*/**', 'docs/**', 'README.md', 'node_modules/**'],
+          // Тот же список, что у check-vault (scripts/vault-ignore.mjs).
+          ignore: STARLIGHT_IGNORE,
         }),
       ],
       sidebar,

@@ -25,7 +25,7 @@ check-vault:
 	node .site/scripts/check-vault.mjs .
 
 check-dist:
-	node .site/scripts/check-dist.mjs .site/dist --base /reference --mermaid 32 --asides 30
+	node .site/scripts/check-dist.mjs .site/dist --base /reference --vault .
 
 # Нужна готовая сборка (make build). Превью поднимается и гасится скриптом.
 check-browser:

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkVault } from './check-vault.mjs';
+import { checkVault, countVault } from './check-vault.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -86,6 +86,46 @@ test('escaped pipe \\| in a table cell is the alias separator', async () => {
   });
   try {
     assert.deepEqual(await checkVault(dir), []);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});
+
+test('only root docs/ and README.md are ignored: nested ones are checked', async () => {
+  const dir = await tmpVault({
+    'README.md': '[[Нет1]]\n',
+    'docs/X.md': '[[Нет2]]\n',
+    'Python/README.md': '[[Нет3]]\n',
+    'Python/docs/Y.md': '[[Нет4]]\n',
+    'a/node_modules/Z.md': '[[Нет5]]\n',
+    'a/.hidden/W.md': '[[Нет6]]\n',
+  });
+  try {
+    const problems = await checkVault(dir);
+    assert.deepEqual(problems.map((p) => p.file).sort(), ['Python/README.md', 'Python/docs/Y.md']);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});
+
+test('countVault counts mermaid fences and callouts outside other fences', async () => {
+  const dir = await tmpVault({
+    'A.md': [
+      '---', 'x: 1', '---',
+      '```mermaid', 'graph TD', '> [!note] в диаграмме', '```',
+      '> [!tip] раз', '> текст', '',
+      '> [!warning]- свёрнуто',
+      '````md', '```mermaid', '> [!note] в примере', '```', '````',
+      '~~~', '> [!note] в тильдах', '~~~',
+      '',
+    ].join('\n'),
+    'sub/B.md': '```mermaid\ngraph LR\n```\n\n> [!info] два\n',
+    'sub/L.md': '- пункт\n\t```mermaid\n\tgraph LR\n\t```\n\t```py\n\t[[Нет]]\n\t```\n',
+    'README.md': '```mermaid\nx\n```\n> [!note] игнор\n',
+    'docs/C.md': '> [!note] игнор\n',
+  });
+  try {
+    assert.deepEqual(await countVault(dir), { mermaid: 3, asides: 3 });
   } finally {
     await rm(dir, { recursive: true });
   }
