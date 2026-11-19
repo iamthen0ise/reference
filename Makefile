@@ -1,13 +1,14 @@
 .PHONY: init run build check test check-vault check-dist check-browser init-browser
 
 PREVIEW_PORT ?= 4321
+PLAYWRIGHT_INSTALL_FLAGS ?=
 
 init:
 	cd .site && npm ci
 	$(MAKE) init-browser
 
 init-browser:
-	cd .site && npx playwright install chromium
+	cd .site && npx playwright install $(PLAYWRIGHT_INSTALL_FLAGS) chromium
 
 run:
 	cd .site && npm run dev
