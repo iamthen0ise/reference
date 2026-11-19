@@ -21,9 +21,11 @@ const config: QuartzConfig = {
       fontOrigin: "googleFonts",
       cdnCaching: true,
       typography: {
-        header: "Schibsted Grotesk",
-        body: "Source Sans Pro",
-        code: "IBM Plex Mono",
+        // Все три с кириллицей: у прежних заголовочных шрифтов её не было,
+        // и русские заголовки рисовались запасным системным шрифтом.
+        header: { name: "Inter", weights: [600, 700] },
+        body: { name: "Inter", weights: [400, 600], includeItalic: false },
+        code: "JetBrains Mono",
       },
       colors: {
         lightMode: {
