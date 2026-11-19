@@ -78,3 +78,15 @@ test('skips ignored dirs', async () => {
     await rm(dir, { recursive: true });
   }
 });
+
+test('escaped pipe \\| in a table cell is the alias separator', async () => {
+  const dir = await tmpVault({
+    'A.md': '| a | b |\n|---|---|\n| x | [[B#Раздел\\|алиас]] и [[B\\|ещё]] |\n',
+    'B.md': '## Раздел\n',
+  });
+  try {
+    assert.deepEqual(await checkVault(dir), []);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});

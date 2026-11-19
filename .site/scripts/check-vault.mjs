@@ -73,7 +73,7 @@ export async function checkVault(vaultDir) {
   for (const file of files) {
     const rel = relative(vaultDir, file);
     for (const link of parsed.get(file).links) {
-      const target = link.split('|')[0].trim();
+      const target = link.split(/\\?\|/)[0].trim();
       const hash = target.indexOf('#');
       const notePart = (hash < 0 ? target : target.slice(0, hash)).trim();
       const heading = hash < 0 ? null : target.slice(hash + 1).trim();
