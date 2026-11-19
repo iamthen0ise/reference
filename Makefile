@@ -1,6 +1,6 @@
 .PHONY: init run build check test check-vault check-dist check-browser init-browser
 
-PREVIEW_PORT ?= 4321
+PREVIEW_PORT ?= 4329
 PLAYWRIGHT_INSTALL_FLAGS ?=
 
 init:
