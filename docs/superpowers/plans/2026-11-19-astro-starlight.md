@@ -4,7 +4,7 @@
 
 **Goal:** заметки разложены по папкам, крупные разрезаны на страницы, сайт собирается Astro Starlight с меню из папок, оглавлением, поиском и переключателем палитр и деплоится на GitHub Pages.
 
-**Architecture:** заметки остаются в vault (корень репозитория) и правятся в Obsidian. Astro-проект в `site/` читает vault плагином `starlight-obsidian`, а mermaid рендерит `astro-mermaid`. Корректность проверяют две утилиты без зависимостей: `check-vault` проверяет, что все вики-ссылки в vault резолвятся, `check-dist` проверяет, что в собранном сайте нет битых ссылок, якорей и сырого синтаксиса Obsidian. Обе запускаются через `make check` локально и в CI.
+**Architecture:** заметки остаются в vault (корень репозитория) и правятся в Obsidian. Astro-проект в `.site/` читает vault плагином `starlight-obsidian`, а mermaid рендерит `astro-mermaid`. Корректность проверяют две утилиты без зависимостей: `check-vault` проверяет, что все вики-ссылки в vault резолвятся, `check-dist` проверяет, что в собранном сайте нет битых ссылок, якорей и сырого синтаксиса Obsidian. Обе запускаются через `make check` локально и в CI.
 
 **Tech Stack:** Astro 7.4, Starlight 0.43, starlight-obsidian 0.15, astro-mermaid 2.2 (mermaid 11), Node 22 (CI), `node --test`, Playwright (только локальная браузерная проверка), Make.
 
@@ -13,10 +13,10 @@
 ## Global Constraints
 
 - Работа ведётся в ветке `astro-starlight` от `main`. Push и merge — только после «да» пользователя.
-- Vault — корень репозитория. В сайт не попадают `site/`, `docs/`, `.github/`, `.obsidian/`, `README.md`, `node_modules/`.
+- Vault — корень репозитория. В сайт не попадают любые скрытые каталоги (`.*`), `.site/`, `docs/`, `.github/`, `.obsidian/`, `README.md`, `node_modules/`.
 - `site: 'https://iamthen0ise.github.io'`, `base: '/reference'`, язык интерфейса `ru`, заголовок «Reference».
 - Шрифты: Inter (текст) и JetBrains Mono (код), обязательно с кириллицей. Подключаются self-hosted через `@fontsource` с подмножеством cyrillic.
-- Node 22 в CI, `site/package-lock.json` лежит в git, версии задаются точными диапазонами `~`.
+- Node 22 в CI, `.site/package-lock.json` лежит в git, версии задаются точными диапазонами `~`.
 - Все процедуры оформлены целями корневого `Makefile`: `init`, `run`, `build`, `test`, `check`, `check-browser`.
 - Утилиты проверки пишутся на чистом Node ESM (`.mjs`), без зависимостей; тесты — `node --test`.
 - Числа-инварианты контента: 32 блока mermaid и 30 callout-блоков (`note` ×5, `tip` ×16, `warning` ×8, `info` ×1).
@@ -38,11 +38,11 @@
 
 **Files:**
 - Create: `Makefile`
-- Create: `site/scripts/check-vault.mjs`
-- Test: `site/scripts/check-vault.test.mjs`, фикстуры `site/scripts/fixtures/vault-ok/`, `site/scripts/fixtures/vault-broken/`
+- Create: `.site/scripts/check-vault.mjs`
+- Test: `.site/scripts/check-vault.test.mjs`, фикстуры `.site/scripts/fixtures/vault-ok/`, `.site/scripts/fixtures/vault-broken/`
 
 **Interfaces:**
-- Produces: CLI `node site/scripts/check-vault.mjs <vaultDir>`. Код возврата 0, если всё резолвится, иначе 1. На каждую проблему печатается строка `<relpath>: [[<link>]] — <reason>`, где reason — `no such note`, `ambiguous note name` или `no such heading`.
+- Produces: CLI `node .site/scripts/check-vault.mjs <vaultDir>`. Код возврата 0, если всё резолвится, иначе 1. На каждую проблему печатается строка `<relpath>: [[<link>]] — <reason>`, где reason — `no such note`, `ambiguous note name` или `no such heading`.
 - Produces: экспорт `checkVault(vaultDir: string): Promise<Array<{file: string, link: string, reason: string}>>`.
 - Правила резолва повторяют Obsidian. Цель `[[Имя]]` ищется по basename `.md` среди файлов vault, без учёта игнорируемых каталогов из Global Constraints; имя должно быть уникальным. `[[Имя#Заголовок]]` требует заголовка с точно таким текстом (`#`…`######`) в целевом файле, `[[#Заголовок]]` — в текущем. Алиас `|…` отбрасывается. Ограждённые блоки кода (```` ``` ````, `~~~`) и инлайн-код пропускаются целиком, в том числе строки `#` внутри них. Frontmatter тоже пропускается.
 
@@ -52,11 +52,11 @@
   - `reports missing note, missing heading, ambiguous name`: в `vault-broken/` лежат `[[Нет]]`, `[[B#Нет такого]]` и два файла `x/C.md` и `y/C.md` со ссылкой `[[C]]` → ровно три проблемы с reason `no such note`, `no such heading`, `ambiguous note name`.
   - `ignores code`: ссылка `[[Нет]]` внутри ```` ```python ```` и внутри `` `инлайн` `` → проблем нет.
   - `heading inside fence is not a heading`: в `B.md` строка `# Фейк` стоит внутри ограждения, `[[B#Фейк]]` → `no such heading`.
-  - `skips ignored dirs`: `site/D.md` и `docs/D.md` не участвуют в резолве, `[[D]]` → `no such note`.
-- [ ] **Step 3: Запустить** `node --test site/scripts/` — ожидается FAIL (модуля нет).
-- [ ] **Step 4: Реализовать** `checkVault` и CLI в `site/scripts/check-vault.mjs`.
-- [ ] **Step 5: Запустить** `node --test site/scripts/` — ожидается PASS. Прогнать на текущем vault (`node site/scripts/check-vault.mjs .`): ожидается 0 проблем. Если проблемы есть, это существующие битые ссылки: перечислить их в отчёте и исправить отдельным коммитом в этой же задаче.
-- [ ] **Step 6: Makefile** — цели `.PHONY: test check-vault`; `test` = `node --test site/scripts/`, `check-vault` = `node site/scripts/check-vault.mjs .`.
+  - `skips ignored dirs`: `.site/D.md` и `docs/D.md` не участвуют в резолве, `[[D]]` → `no such note`.
+- [ ] **Step 3: Запустить** `node --test .site/scripts/` — ожидается FAIL (модуля нет).
+- [ ] **Step 4: Реализовать** `checkVault` и CLI в `.site/scripts/check-vault.mjs`.
+- [ ] **Step 5: Запустить** `node --test .site/scripts/` — ожидается PASS. Прогнать на текущем vault (`node .site/scripts/check-vault.mjs .`): ожидается 0 проблем. Если проблемы есть, это существующие битые ссылки: перечислить их в отчёте и исправить отдельным коммитом в этой же задаче.
+- [ ] **Step 6: Makefile** — цели `.PHONY: test check-vault`; `test` = `node --test .site/scripts/`, `check-vault` = `node .site/scripts/check-vault.mjs .`.
 - [ ] **Step 7: Commit** — `Add vault wiki-link checker`.
 
 ### Task 2: Раскладка по папкам и разрезка заметок
@@ -92,12 +92,12 @@
 Риск: обычный — инструмент проверки.
 
 **Files:**
-- Create: `site/scripts/check-dist.mjs`
-- Test: `site/scripts/check-dist.test.mjs`, фикстура `site/scripts/fixtures/dist/` (несколько `index.html`)
+- Create: `.site/scripts/check-dist.mjs`
+- Test: `.site/scripts/check-dist.test.mjs`, фикстура `.site/scripts/fixtures/dist/` (несколько `index.html`)
 - Modify: `Makefile`
 
 **Interfaces:**
-- Produces: CLI `node site/scripts/check-dist.mjs <distDir> --base /reference --mermaid 32 --asides 30`. Код возврата 0/1, проблемы печатаются по строке.
+- Produces: CLI `node .site/scripts/check-dist.mjs <distDir> --base /reference --mermaid 32 --asides 30`. Код возврата 0/1, проблемы печатаются по строке.
 - Produces: экспорт `checkDist(distDir: string, opts: {base: string, mermaid: number, asides: number}): Promise<string[]>`.
 - Что проверяется:
   - каждый внутренний `href` (относительный или начинающийся с `base`) после `decodeURIComponent` указывает на существующий `index.html` или файл в `dist`;
@@ -118,7 +118,7 @@
 - [ ] **Step 2: Запустить** `make test` — ожидается FAIL.
 - [ ] **Step 3: Реализовать** `checkDist` и CLI.
 - [ ] **Step 4: Запустить** `make test` — ожидается PASS.
-- [ ] **Step 5: Makefile** — цель `check-dist` = `node site/scripts/check-dist.mjs site/dist --base /reference --mermaid 32 --asides 30`.
+- [ ] **Step 5: Makefile** — цель `check-dist` = `node .site/scripts/check-dist.mjs .site/dist --base /reference --mermaid 32 --asides 30`.
 - [ ] **Step 6: Commit** — `Add built-site link and syntax checker`.
 
 ### Task 4: Сайт на Astro Starlight
@@ -126,14 +126,14 @@
 Риск: обычный — сборка и конфиг; корректность ловят `check-vault` и `check-dist`.
 
 **Files:**
-- Create: `site/package.json`, `site/package-lock.json`, `site/astro.config.mjs`, `site/tsconfig.json`, `site/src/content.config.ts`, `site/src/styles/base.css`, `.gitignore`
+- Create: `.site/package.json`, `.site/package-lock.json`, `.site/astro.config.mjs`, `.site/tsconfig.json`, `.site/src/content.config.ts`, `.site/src/styles/base.css`, `.gitignore`
 - Modify: `Makefile`
 
 **Interfaces:**
 - Consumes: дерево vault из Task 2, `make check-dist` из Task 3.
-- Produces: `npm run build` в `site/` собирает сайт в `site/dist/`. Каталог, куда `starlight-obsidian` генерирует страницы, попадает в `.gitignore`. Task 5 переопределяет компонент `ThemeSelect` и добавляет CSS в массив `customCss` в `astro.config.mjs`.
+- Produces: `npm run build` в `.site/` собирает сайт в `.site/dist/`. Каталог, куда `starlight-obsidian` генерирует страницы, попадает в `.gitignore`. Task 5 переопределяет компонент `ThemeSelect` и добавляет CSS в массив `customCss` в `astro.config.mjs`.
 
-- [ ] **Step 1: Скаффолд** `site/` с зависимостями `astro@~7.4`, `@astrojs/starlight@~0.43`, `starlight-obsidian@~0.15`, `astro-mermaid@~2.2`, `mermaid@~11`, `@fontsource/inter`, `@fontsource/jetbrains-mono`. Скрипты `dev`, `build`, `preview`.
+- [ ] **Step 1: Скаффолд** `.site/` с зависимостями `astro@~7.4`, `@astrojs/starlight@~0.43`, `starlight-obsidian@~0.15`, `astro-mermaid@~2.2`, `mermaid@~11`, `@fontsource/inter`, `@fontsource/jetbrains-mono`. Скрипты `dev`, `build`, `preview`.
 - [ ] **Step 2: Конфиг:**
   - `starlightObsidian({ vault: '..', ignore: [...] })` — игнор из Global Constraints;
   - `astro-mermaid` с автопереключением светлой и тёмной темы, подключённый так, чтобы mermaid-блоки не попадали в Expressive Code (порядок интеграций — по README `astro-mermaid`);
@@ -141,7 +141,7 @@
   - сайдбар: группы «Алгоритмы», «Python», «Бэкенд» (внутри «Чек-лист бэкенда», «Базы данных», «Очереди»). В разрезанной папке обзор идёт первым, затем подстраницы в порядке разделов исходной заметки. Механизм порядка выбирает исполнитель (явный `sidebar` или `sidebar.order`), но он не должен добавлять служебные поля в заметки, видимые в Obsidian, если без этого можно обойтись;
   - главная `/reference/` показывает содержимое `index.md` или перенаправляет на его страницу.
 - [ ] **Step 3: Шрифты** — Inter 400/600/700 и JetBrains Mono 400 с подмножеством cyrillic, подключены через `customCss` в `base.css`; `--sl-font` и `--sl-font-mono` указывают на них.
-- [ ] **Step 4: Makefile** — `init` = `cd site && npm ci`, `run` = `cd site && npm run dev`, `build` = `cd site && npm run build`, `check` = `check-vault` → `build` → `check-dist`.
+- [ ] **Step 4: Makefile** — `init` = `cd .site && npm ci`, `run` = `cd .site && npm run dev`, `build` = `cd .site && npm run build`, `check` = `check-vault` → `build` → `check-dist`.
 - [ ] **Step 5: Запустить** `make check`. Ожидается: сборка без предупреждений о битых ссылках, `check-dist` выдаёт 0 проблем.
   **Стоп-условие:** если `starlight-obsidian` не даёт пройти `check-dist` и это не чинится его настройками (якоря с кириллицей, алиасы, callout→aside, mermaid), не переходить на свои remark-плагины самостоятельно. Вернуть BLOCKED с конкретными падающими ссылками и причиной.
 - [ ] **Step 6: Commit** — `Build notes site with Astro Starlight`.
@@ -151,8 +151,8 @@
 Риск: обычный — UI.
 
 **Files:**
-- Create: `site/src/components/ThemeSelect.astro`, `site/src/styles/palettes.css`, `site/src/styles/mobile.css`, `site/scripts/check-browser.mjs`
-- Modify: `site/astro.config.mjs` (`components.ThemeSelect`, `customCss`, `head`), `site/package.json` (devDependency `playwright`), `Makefile`
+- Create: `.site/src/components/ThemeSelect.astro`, `.site/src/styles/palettes.css`, `.site/src/styles/mobile.css`, `.site/scripts/check-browser.mjs`
+- Modify: `.site/astro.config.mjs` (`components.ThemeSelect`, `customCss`, `head`), `.site/package.json` (devDependency `playwright`), `Makefile`
 
 **Interfaces:**
 - Consumes: сборка из Task 4.
@@ -166,7 +166,7 @@
   - (d) если `localStorage.getItem` и `setItem` бросают исключение (через `addInitScript`), страница рисуется, `data-palette` = `starlight`, нет `pageerror`.
   Код возврата 0 или 1.
 
-- [ ] **Step 1: Написать `check-browser.mjs`** и цель Makefile `check-browser`. Она поднимает `npm run preview` в фоне, запускает скрипт и гасит превью. Цель `init-browser` = `cd site && npx playwright install chromium`.
+- [ ] **Step 1: Написать `check-browser.mjs`** и цель Makefile `check-browser`. Она поднимает `npm run preview` в фоне, запускает скрипт и гасит превью. Цель `init-browser` = `cd .site && npx playwright install chromium`.
 - [ ] **Step 2: Запустить** `make build check-browser` — ожидается FAIL в (c), потому что переключателя ещё нет. В (a) возможны падения, они фиксируют текущее состояние мобильной вёрстки.
 - [ ] **Step 3: Реализовать** палитры, `ThemeSelect`, инлайн-скрипт и `mobile.css`. В `mobile.css` переносятся правила из старого `site/custom.scss`: таблицы `display:block; overflow-x:auto`, ячейки `min-width: 9rem; max-width: 22rem`, переносы, `pre` со скроллом и `font-size: 0.8rem`, `overflow-wrap: anywhere` для текста статьи. Селекторы адаптируются под разметку Starlight (`.sl-markdown-content`).
 - [ ] **Step 4: Запустить** `make check && make check-browser` — ожидается PASS.
@@ -178,16 +178,16 @@
 
 **Files:**
 - Modify: `.github/workflows/deploy.yml`, `README.md`
-- Delete: `site/quartz.config.ts`, `site/quartz.layout.ts`, `site/custom.scss`
+- Delete: `site/quartz.config.ts`, `site/quartz.layout.ts`, `site/custom.scss`, затем пустой каталог `site/`
 
 **Interfaces:**
 - Consumes: цели Makefile `init` и `check`.
 
 - [ ] **Step 1: Workflow:**
   - `actions/checkout@v4`;
-  - `actions/setup-node@v4` с `node-version: 22`, `cache: npm`, `cache-dependency-path: site/package-lock.json`;
+  - `actions/setup-node@v4` с `node-version: 22`, `cache: npm`, `cache-dependency-path: .site/package-lock.json`;
   - `make init`, затем `make check`;
-  - `actions/configure-pages@v5`, `actions/upload-pages-artifact@v3` с `path: site/dist`;
+  - `actions/configure-pages@v5`, `actions/upload-pages-artifact@v3` с `path: .site/dist`;
   - job `deploy` без изменений. Клон Quartz и `QUARTZ_REF` удаляются.
 - [ ] **Step 2: README** — сайт собирается Astro Starlight из vault. Новые заметки кладутся в папку раздела, имя файла должно быть уникальным во всём vault. Локально: `make init`, `make run`, перед пушем `make check`. Для браузерной проверки: `make init-browser`, `make check-browser`.
 - [ ] **Step 3: Удалить файлы Quartz.** Запустить `make check` — ожидается PASS. Проверить, что синтаксис workflow корректен: `actionlint`, если он установлен, иначе внимательно перечитать.
