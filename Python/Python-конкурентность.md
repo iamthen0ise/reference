@@ -26,6 +26,44 @@ title: "Python: потоки, процессы, asyncio, GIL и GC"
 | `ThreadPoolExecutor(4)` | 0,65 с — ускорения нет, мешает GIL |
 | `ProcessPoolExecutor(4)` | 0,23 с |
 
+Так же замер можно повторить самому (числа ниже получены на этой машине и округлены: на другой будут другие, важно соотношение):
+
+```python
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
+
+def cpu(n: int) -> int:
+    total = 0
+    for i in range(n):
+        total += i * i
+    return total
+
+
+def run(name, pool_cls):
+    start = time.perf_counter()
+    if pool_cls is None:
+        list(map(cpu, [5_000_000] * 4))
+    else:
+        with pool_cls(4) as pool:
+            list(pool.map(cpu, [5_000_000] * 4))
+    print(f"{name:8} {time.perf_counter() - start:.1f} с")
+
+
+if __name__ == "__main__":
+    run("подряд", None)
+    run("потоки", ThreadPoolExecutor)
+    run("процессы", ProcessPoolExecutor)
+```
+
+```text title="Вывод"
+подряд   0.7 с
+потоки   0.7 с
+процессы 0.2 с
+```
+
+Потоки не быстрее последовательного запуска: Python-код в каждый момент исполняет только один из них.
+
 `concurrent.futures` даёт один интерфейс для потоков и процессов: `submit` возвращает `Future`, `map` — результаты по порядку, `as_completed` — по мере готовности.
 
 ```python
@@ -71,26 +109,44 @@ if __name__ == "__main__":  # обязательно для процессов, 
 **GIL не делает код потокобезопасным.** Он гарантирует целостность внутренних структур интерпретатора (список не сломается от двух `append`), но не вашей логики. `x += 1` — это несколько операций байткода: прочитать, сложить, записать; поток могут переключить между ними. Реальнее всего гонка (race condition) проявляется в схеме «проверить, потом действовать», где между проверкой и действием есть ввод-вывод:
 
 ```python
+import contextlib
 import threading
 import time
 
 balance = 100
+start = threading.Barrier(2)  # оба потока стартуют одновременно
 
 
-def withdraw(amount: int) -> None:
+def withdraw(amount: int, guard) -> None:
     global balance
-    if balance >= amount:      # проверили
-        time.sleep(0.001)      # запрос в БД, логирование — GIL отпущен
-        balance -= amount      # действуем по устаревшей проверке
+    start.wait()
+    with guard:
+        if balance >= amount:      # проверили
+            time.sleep(0.001)      # запрос в БД, логирование — GIL отпущен
+            balance -= amount      # действуем по устаревшей проверке
 
 
-threads = [threading.Thread(target=withdraw, args=(100,)) for _ in range(2)]
-for t in threads:
-    t.start()
-for t in threads:
-    t.join()
-print(balance)  # -100: оба потока прошли проверку
+def run(guard) -> int:
+    global balance
+    balance = 100
+    threads = [threading.Thread(target=withdraw, args=(100, guard)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return balance
+
+
+print("без блокировки:", run(contextlib.nullcontext()))
+print("с Lock:        ", run(threading.Lock()))
 ```
+
+```text title="Вывод"
+без блокировки: -100
+с Lock:         0
+```
+
+`Barrier` нужен, чтобы оба потока стартовали вместе, иначе первый может успеть закончить до запуска второго. Без блокировки оба прошли проверку `balance >= 100`, пока первый «ходил в базу», и баланс ушёл в минус. Под общей `Lock` вся пара «проверил и списал» выполняется целиком, и второй поток видит уже 0. (`time.sleep(0)` здесь гонку не воспроизвёл: GIL он отпускает, но возвращается раньше, чем второй поток успевает дойти до проверки; нужна пауза заметной длины, как у настоящего запроса.)
 
 Лечится блокировкой вокруг всей пары «проверить и действовать» (см. [[#Синхронизация потоков]]), а если состояние лежит в базе — средствами базы, см. [[Блокировки]].
 
@@ -114,6 +170,53 @@ print(balance)  # -100: оба потока прошли проверку
 - от объектов, на которые есть внешние ссылки, проходит по их ссылкам и помечает всё достижимое как живое; остальное — мусор, его финализируют (`__del__`, с Python 3.4 работает и для циклов, PEP 442) и освобождают.
 
 Сборщик **поколенческий** (generational): новые объекты попадают в поколение 0; пережившие сборку переходят в следующее. Идея — большинство объектов умирают молодыми, поэтому часто проверяют только молодых. Сборка поколения 0 запускается, когда число созданных контейнеров минус удалённых превышает порог (`gc.get_threshold()`: 700 до Python 3.12, 2000 с 3.13), старшие поколения — реже. Сборка останавливает программу, пока идёт, поэтому на огромных кучах объектов бывают паузы.
+
+Подсчёт ссылок и цикл, который счётчиком не собрать (`weakref.finalize` печатает сообщение в момент удаления объекта):
+
+```python
+import gc
+import sys
+import weakref
+
+
+class Node:
+    pass
+
+
+a = Node()
+print(sys.getrefcount(a))  # a + аргумент getrefcount
+b = a
+print(sys.getrefcount(a))
+del b
+print(sys.getrefcount(a))
+del a
+
+x = Node()
+weakref.finalize(x, print, "простой объект удалён")
+del x
+print("после del x")
+
+y, z = Node(), Node()
+y.other, z.other = z, y
+weakref.finalize(y, print, "цикл собран")
+del y, z
+print("после del y, z")
+gc.collect()
+print("после gc.collect()")
+```
+
+```text title="Вывод"
+2
+3
+2
+простой объект удалён
+после del x
+после del y, z
+цикл собран
+после gc.collect()
+```
+
+Первая строка — `2`, а не `1`: аргумент `getrefcount` тоже ссылка. Простой объект удалён в момент `del x`, до следующей строки. Пара `y` и `z` ссылается друг на друга, поэтому после `del` счётчики не нули, и объекты живут до `gc.collect()` (или до очередной автоматической сборки).
 
 Практика:
 
@@ -391,13 +494,483 @@ asyncio.run(main())
 - **`asyncio.timeout(...)`** (3.11+) или `wait_for` — дедлайн. По истечении задача внутри отменяется, наружу вылетает `TimeoutError`.
 - **Блокирующий код — в поток**: `await asyncio.to_thread(fn, *args)` или `loop.run_in_executor(pool, fn)`. Вычисления — в `ProcessPoolExecutor` через тот же `run_in_executor`.
 
+### `gather` и `TaskGroup`: что с остальными задачами, когда одна упала
+
+Три задачи: одна падает через 0,1 с, две другие работают дольше.
+
+```python
+import asyncio
+
+
+async def job(name: str, delay: float, fail: bool = False) -> str:
+    try:
+        await asyncio.sleep(delay)
+        if fail:
+            raise ValueError(f"{name} упала")
+        print(name, "готова")
+        return name
+    except asyncio.CancelledError:
+        print(name, "отменена")
+        raise
+
+
+def specs():
+    return [job("fail", 0.1, fail=True), job("slow", 0.5), job("fast", 0.3)]
+
+
+async def with_gather() -> None:
+    try:
+        await asyncio.gather(*specs())
+    except ValueError as e:
+        print("gather поймал:", e)
+    await asyncio.sleep(0.6)  # ждём: кто-то ещё доработает?
+
+
+async def with_group() -> None:
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for c in specs():
+                tg.create_task(c)
+    except* ValueError as eg:
+        print("TaskGroup поймал:", eg.exceptions[0])
+
+
+print("--- gather")
+asyncio.run(with_gather())
+print("--- TaskGroup")
+asyncio.run(with_group())
+```
+
+```text title="Вывод"
+--- gather
+gather поймал: fail упала
+fast готова
+slow готова
+--- TaskGroup
+fast отменена
+slow отменена
+TaskGroup поймал: fail упала
+```
+
+После ошибки `gather` просто отдал исключение, а остальные задачи доработали сами, уже никем не ожидаемые: их результат потерян, а побочные эффекты случились. `TaskGroup` отменил соседей и вышел только после того, как они завершились.
+
+### `asyncio.timeout`
+
+```python
+import asyncio
+
+
+async def main() -> None:
+    try:
+        async with asyncio.timeout(0.1):
+            await asyncio.sleep(1)
+    except TimeoutError as e:
+        print(repr(e))
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+TimeoutError()
+```
+
+Внутри блока задача отменена (`CancelledError` на `await`), а снаружи `async with` превратил отмену в обычный `TimeoutError`.
+
 Ловушки:
 
-- **Забытый `await`.** `fetch(1)` без `await` создаёт корутину и ничего не делает; Python предупредит `RuntimeWarning: coroutine ... was never awaited`, но только когда корутину соберёт сборщик мусора.
+- **Забытый `await`.** `fetch(1)` без `await` создаёт корутину и ничего не делает; Python предупредит `RuntimeWarning: coroutine ... was never awaited`, но только когда объект корутины удаляется: сразу, если ссылки на неё нет (как ниже), и позже, если она где-то лежит. Пример в подразделе «Забытый `await`».
 - **Задача «запустил и забыл».** Цикл событий хранит на задачи только слабые ссылки: `asyncio.create_task(send_email())` без сохранения результата может быть собрана сборщиком мусора посреди работы. Держите ссылки (множество задач с `add_done_callback(tasks.discard)`) или используйте `TaskGroup`.
-- **Отмена.** `task.cancel()` бросает `CancelledError` внутрь корутины на текущем `await`. Её нужно пробрасывать дальше (или пересоздавать после очистки), а не глотать: `except Exception` её не ловит, а вот `except BaseException` и голый `except:` ловят. Защитить кусок от отмены снаружи — `asyncio.shield`.
+- **Отмена.** `task.cancel()` бросает `CancelledError` внутрь корутины на текущем `await`. Её нужно пробрасывать дальше (или пересоздавать после очистки), а не глотать: `except Exception` её не ловит, а вот `except BaseException` и голый `except:` ловят. Защитить кусок от отмены снаружи — `asyncio.shield`. Пример ниже, в подразделе «Отмена: проглоченная и проброшенная».
 - **Примитивы asyncio не потокобезопасны.** `asyncio.Lock`, `Queue`, `Event` — только для задач одного цикла. Из другого потока в цикл передают работу через `loop.call_soon_threadsafe` или `asyncio.run_coroutine_threadsafe`.
 - **Контекст запроса.** `threading.local` в asyncio не работает: все задачи в одном потоке. Для id запроса, пользователя, трассировки — `contextvars.ContextVar`: каждая задача при создании получает копию текущего контекста.
+
+### Забытый `await`
+
+```python
+import asyncio
+
+
+async def fetch(i: int) -> int:
+    return i
+
+
+async def main() -> None:
+    fetch(1)  # забыли await
+    print("дальше")
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+a1.py:9: RuntimeWarning: coroutine 'fetch' was never awaited
+  fetch(1)  # забыли await
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+дальше
+```
+
+Предупреждение пришло из `stderr` сразу при удалении корутины, а программа пошла дальше как ни в чём не бывало.
+
+### Отмена: проглоченная и проброшенная
+
+```python
+import asyncio
+
+
+async def worker(swallow: bool) -> None:
+    try:
+        await asyncio.sleep(10)
+    except BaseException as e:  # голый except ведёт себя так же
+        print("поймали", type(e).__name__)
+        if not swallow:
+            raise
+    print("корутина пошла дальше")
+
+
+async def run(swallow: bool) -> None:
+    t = asyncio.create_task(worker(swallow))
+    await asyncio.sleep(0.1)
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        print("main: await t бросил CancelledError")
+    print("t.cancelled() =", t.cancelled())
+
+
+for swallow in (True, False):
+    print("проглочен:" if swallow else "проброшен:")
+    asyncio.run(run(swallow))
+```
+
+```text title="Вывод"
+проглочен:
+поймали CancelledError
+корутина пошла дальше
+t.cancelled() = False
+проброшен:
+поймали CancelledError
+main: await t бросил CancelledError
+t.cancelled() = True
+```
+
+Если `CancelledError` проглочена, задача считает себя живой и завершается как обычная: `cancelled()` равно `False`, `await t` ничего не бросает. Для `TaskGroup` и `asyncio.timeout` это тяжело: они рассчитывают, что отмена дойдёт до границы блока.
+
+### `ContextVar` в двух задачах
+
+```python
+import asyncio
+import contextvars
+
+request_id = contextvars.ContextVar("request_id", default="-")
+
+
+async def handle(rid: str) -> None:
+    request_id.set(rid)
+    await asyncio.sleep(0.01)  # пока ждём, вторая задача успела записать своё
+    print(rid, "видит", request_id.get())
+
+
+async def main() -> None:
+    await asyncio.gather(handle("A"), handle("B"))
+    print("снаружи:", request_id.get())
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+A видит A
+B видит B
+снаружи: -
+```
+
+`gather` оборачивает каждую корутину в задачу с копией контекста, поэтому `set` в одной не виден другой и не виден снаружи. С глобальной переменной обе задачи увидели бы значение той, что записала последней.
+
+### `ExceptionGroup` во вложенных `TaskGroup`
+
+Типичный код: внешний `TaskGroup` запускает функцию, у которой внутри свой `TaskGroup`. Тогда ошибка листа обёрнута дважды. Код, который берёт `eg.exceptions[0]` и ждёт там исходное исключение, работает при одной группе и ломается при двух: во внутренней группе нет атрибутов исходной ошибки (в реальном сервисе так получили `AttributeError: 'ExceptionGroup' object has no attribute 'cause'`).
+
+```python
+import asyncio
+
+
+class ActivityError(Exception):
+    pass
+
+
+async def activity() -> None:
+    raise ActivityError("нет такого тарифа")
+
+
+async def fees() -> None:  # внутренняя группа
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(activity())
+
+
+async def workflow() -> None:  # внешняя группа
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(fees())
+
+
+def first_leaf(exc: BaseException) -> BaseException:
+    while isinstance(exc, BaseExceptionGroup):
+        exc = exc.exceptions[0]
+    return exc
+
+
+async def main() -> None:
+    try:
+        await workflow()
+    except ExceptionGroup as eg:
+        print("exceptions[0]:", repr(eg.exceptions[0]))
+        print("лист:         ", repr(first_leaf(eg)))
+        print("subgroup:     ", repr(eg.subgroup(ActivityError)))
+
+    try:
+        await workflow()
+    except* ActivityError as leaves:
+        print("except*:      ", repr(leaves))
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+exceptions[0]: ExceptionGroup('unhandled errors in a TaskGroup', [ActivityError('нет такого тарифа')])
+лист:          ActivityError('нет такого тарифа')
+subgroup:      ExceptionGroup('unhandled errors in a TaskGroup', [ExceptionGroup('unhandled errors in a TaskGroup', [ActivityError('нет такого тарифа')])])
+except*:       ExceptionGroup('unhandled errors in a TaskGroup', [ExceptionGroup('unhandled errors in a TaskGroup', [ActivityError('нет такого тарифа')])])
+```
+
+- `exceptions[0]` — это внутренняя группа, а не `ActivityError`.
+- `subgroup(тип)` и `split(тип)` отбирают нужные листья, но сохраняют форму дерева: результат всё так же обёрнут в две группы. То же с `except*`: блок получает группу, в которой остались только подходящие исключения, вложенность не снимается.
+- До самого листа дойти можно рекурсивным обходом (`first_leaf` выше) или циклом по `exceptions`, пока элемент — группа. Если нужен конкретный тип, проще отобрать его `subgroup` и обойти результат.
+- Лучше, когда вложенность не важна, не лезть в `exceptions[0]` вообще, а обработать группу целиком через `except*`.
+
+Второе правило оттуда же: done-callback не должен звать `task.result()` у отменённой задачи, там бросится `CancelledError`, и это уже ошибка в самом обработчике колбэков цикла:
+
+```python
+import asyncio
+
+
+async def job(delay: float) -> int:
+    await asyncio.sleep(delay)
+    return 1
+
+
+def bad_callback(task: asyncio.Task) -> None:
+    print("результат:", task.result())
+
+
+def good_callback(task: asyncio.Task) -> None:
+    if task.cancelled():
+        print("отменена")
+    elif (exc := task.exception()) is not None:
+        print("упала:", repr(exc))
+    else:
+        print("результат:", task.result())
+
+
+async def main() -> None:
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda l, ctx: print("loop handler:", repr(ctx["exception"])))
+    for cb in (bad_callback, good_callback):
+        t = asyncio.create_task(job(10))
+        t.add_done_callback(cb)
+        await asyncio.sleep(0)
+        t.cancel()
+        await asyncio.gather(t, return_exceptions=True)
+        await asyncio.sleep(0)
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+loop handler: CancelledError()
+отменена
+```
+
+Первый колбэк упал на `result()` и попал в обработчик исключений цикла (без своего обработчика это просто строка в логе), второй проверяет `cancelled()` и `exception()` перед `result()`.
+
+### Таймауты HTTP-клиента: на фазу, а не на запрос
+
+`httpx.Timeout(3)` задаёт одно число четырём таймаутам сразу: на подключение (connect), чтение (read), запись (write) и ожидание соединения из пула (pool). Каждый срабатывает независимо и отсчитывается заново, поэтому «таймаут 3 секунды» не означает, что запрос уложится в 3 секунды: сервер, который присылает по байту раз в полсекунды, держит клиента сколько угодно, ни один `read` не истекает. Общий дедлайн попытки задаёт `asyncio.timeout`.
+
+Локальный медленный сервер: после заголовков шлёт по байту каждые 0,3 с (10 байт, итого 3 с). Второй сервер принял запрос и молчит.
+
+```python
+import asyncio
+import time
+
+import httpx
+
+
+async def slow(reader, writer):
+    await reader.readuntil(b"\r\n\r\n")
+    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+    await writer.drain()
+    for _ in range(10):          # байт за байтом, пауза 0,3 с
+        await asyncio.sleep(0.3)
+        writer.write(b"x")
+        await writer.drain()
+    writer.close()
+
+
+async def silent(reader, writer):
+    await reader.readuntil(b"\r\n\r\n")
+    await asyncio.sleep(5)       # принял запрос и молчит
+
+
+async def main() -> None:
+    srv = await asyncio.start_server(slow, "127.0.0.1", 0)
+    url = f"http://127.0.0.1:{srv.sockets[0].getsockname()[1]}/"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(1)) as client:
+        start = time.perf_counter()
+        r = await client.get(url)
+        print(f"Timeout(1): ответ {r.status_code} за {time.perf_counter() - start:.1f} с")
+
+        start = time.perf_counter()
+        try:
+            async with asyncio.timeout(1):
+                await client.get(url)
+        except TimeoutError as e:
+            print(f"asyncio.timeout(1): {type(e).__name__} за {time.perf_counter() - start:.1f} с")
+    srv.close()
+
+    srv = await asyncio.start_server(silent, "127.0.0.1", 0)
+    url = f"http://127.0.0.1:{srv.sockets[0].getsockname()[1]}/"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(0.3)) as client:
+        try:
+            await client.get(url)
+        except httpx.TimeoutException as e:
+            print(f"str: {str(e)!r}")
+            print(f"repr: {e!r}")
+    srv.close()
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+Timeout(1): ответ 200 за 3.0 с
+asyncio.timeout(1): TimeoutError за 1.0 с
+str: ''
+repr: ReadTimeout('')
+```
+
+- `Timeout(1)` ни разу не сработал: между байтами проходит 0,3 с, меньше секунды. Запрос занял 3 секунды.
+- `asyncio.timeout(1)` оборвал попытку ровно на секунде. С ретраями худший случай — `попыток × таймаут попытки`, его легко посчитать и сверить с бюджетом вызывающего.
+- `str()` у `httpx.ReadTimeout` пустая: в логе после `logger.error("ошибка: %s", e)` будет «ошибка: ». Логируйте `repr(e)` или `type(e).__name__`.
+- `asyncio.timeout` бросает голый `TimeoutError`, а не `httpx.TimeoutException`: поймать нужно оба, если ретраи настроены на `httpx`-исключения.
+
+Для `requests` то же устройство: `timeout=3` — это connect и read по отдельности, а не весь запрос. Исключения устроены так (смотрим исходник `requests/exceptions.py` версии 2.34, здесь не запускалось): `class ConnectTimeout(ConnectionError, Timeout)` — наследует сразу оба. Поэтому порядок `except` решает: `except ConnectionError` перед `except Timeout` поймает и таймаут подключения, и недоступность хоста; чтобы отличить перегрузку от недоступности, `ConnectTimeout` ловят отдельной веткой первой. `ReadTimeout` наследует только `Timeout`.
+
+### Ограничение параллелизма на 100 000 задач
+
+`gather(*(handle(x) for x in items))` разворачивает генератор сразу: все 100 000 корутин и задач создаются до первого `await`, и память растёт пропорционально числу элементов, даже если за раз нужны десять. Вариант с N воркерами создаёт задач ровно N, а элементы берёт из общего итератора:
+
+```python
+import asyncio
+import tracemalloc
+
+N = 100_000
+
+
+async def handle(x: int) -> int:
+    await asyncio.sleep(0.01)  # здесь — await client.get(...)
+    return x
+
+
+async def with_gather() -> None:
+    await asyncio.gather(*(handle(x) for x in range(N)))  # все корутины и задачи сразу
+
+
+async def with_workers(workers: int = 100) -> None:
+    items = iter(range(N))  # один общий итератор
+
+    async def worker() -> None:
+        for x in items:  # next() синхронный: между проверкой и выдачей нет await
+            await handle(x)
+
+    async with asyncio.TaskGroup() as tg:
+        for _ in range(workers):
+            tg.create_task(worker())
+
+
+for fn in (with_gather, with_workers):
+    tracemalloc.start()
+    asyncio.run(fn())
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    print(f"{fn.__name__:13} пик {peak / 1e6:.1f} МБ")
+```
+
+```text title="Вывод"
+with_gather   пик 160.5 МБ
+with_workers  пик 0.2 МБ
+```
+
+Пиковая память по `tracemalloc` (число с этой машины; важен порядок: около 1,6 КБ на каждую из 100 000 задач против почти ничего). Гонок у воркеров нет: цикл событий однопоточный, а `next()` у итератора синхронный, так что два воркера не могут получить один и тот же элемент, переключение возможно только на `await`. Ограничение параллелизма задаёт число воркеров; `Semaphore` поверх этого не нужен. Но воркеры должны читать именно общий итератор (`for x in items`), а не каждый свой `range`.
+
+### Блокирующий код в `async def` останавливает цикл
+
+Задача-«тикалка» просыпается каждые 10 мс и замеряет, насколько опоздала. Под ней — три способа потратить по полсекунды (последний — тяжёлый regex с катастрофическим откатом):
+
+```python
+import asyncio
+import re
+import time
+
+
+async def ticker(gaps: list[float]) -> None:
+    last = time.perf_counter()
+    while True:
+        await asyncio.sleep(0.01)
+        now = time.perf_counter()
+        gaps.append(now - last - 0.01)
+        last = now
+
+
+async def blocking_call() -> None:
+    time.sleep(0.5)  # синхронный SDK внутри async def
+
+
+async def threaded_call() -> None:
+    await asyncio.to_thread(time.sleep, 0.5)
+
+
+async def heavy_regex() -> None:
+    re.match(r"(a+)+$", "a" * 25 + "!")  # катастрофический откат
+
+
+async def measure(coro_fn) -> None:
+    gaps: list[float] = []
+    t = asyncio.create_task(ticker(gaps))
+    await asyncio.sleep(0.1)
+    await coro_fn()
+    await asyncio.sleep(0.1)
+    t.cancel()
+    print(f"{coro_fn.__name__:14} худшая задержка тика {max(gaps) * 1000:.0f} мс")
+
+
+async def main() -> None:
+    for fn in (blocking_call, threaded_call, heavy_regex):
+        await measure(fn)
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+blocking_call  худшая задержка тика 492 мс
+threaded_call  худшая задержка тика 1 мс
+heavy_regex    худшая задержка тика 768 мс
+```
+
+Синхронный `time.sleep` (так же — вызов синхронного SDK, например клиента HubSpot) в `async def` остановил весь цикл на полсекунды, остальные задачи и запросы стояли; та же пауза через `to_thread` задержку почти не меняет. Вычисление, которое не отдаёт управление (regex, парсинг, сериализация большого объекта), ведёт себя как блокирующий вызов, и `to_thread` помогает только когда оно отпускает GIL; для чистых вычислений нужен процесс. Для хендлеров FastAPI есть дешёвый вариант: обычный `def` вместо `async def` исполняется в пуле потоков. Время задержек — с этой машины.
 
 ## Что спросят дальше
 

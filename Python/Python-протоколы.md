@@ -22,6 +22,79 @@ def load_report(day): ...
 - **Декоратор выполняется один раз, при определении функции**, то есть обычно при импорте модуля. При каждом вызове выполняется уже обёртка, которую он вернул. Поэтому код в теле декоратора (вне обёртки) — место для регистрации функции (так работают `@app.get(...)` во FastAPI и `@pytest.fixture`), но не для логики вызова.
 - **Несколько декораторов применяются снизу вверх, а выполняются сверху вниз.** `@a @b def f` — это `f = a(b(f))`: при вызове сначала срабатывает внешняя обёртка `a`, она вызывает обёртку `b`, та — исходную `f`.
 
+Когда что выполняется. Декоратор срабатывает при определении функции, обёртка — при каждом вызове:
+
+```python
+def register(func):
+    print("декоратор выполнился для", func.__name__)
+    return func
+
+
+print("до определения")
+
+
+@register
+def handler():
+    print("handler вызван")
+
+
+print("после определения")
+handler()
+handler()
+```
+
+```text title="Вывод"
+до определения
+декоратор выполнился для handler
+после определения
+handler вызван
+handler вызван
+```
+
+Стек из двух декораторов: применяются снизу вверх, а обёртки входят сверху вниз.
+
+```python
+import functools
+
+
+def tag(name):
+    def deco(func):
+        print("применяю", name)
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            print("вход", name)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                print("выход", name)
+
+        return wrapper
+
+    return deco
+
+
+@tag("a")
+@tag("b")
+def f():
+    print("f")
+
+
+print("вызов")
+f()
+```
+
+```text title="Вывод"
+применяю b
+применяю a
+вызов
+вход a
+вход b
+f
+выход b
+выход a
+```
+
 Обёртка видит исходную функцию через **замыкание** (closure): вложенная функция запоминает переменные внешней функции, в которой её создали, даже после того как внешняя функция вернула управление.
 
 ### Наивный декоратор и functools.wraps
@@ -38,7 +111,11 @@ def charge(user_id: int, amount: int) -> None:
     """Списать деньги."""
 
 
-print(charge.__name__, charge.__doc__)  # wrapper None
+print(charge.__name__, charge.__doc__)
+```
+
+```text title="Вывод"
+wrapper None
 ```
 
 Наивная обёртка подменяет функцию целиком: снаружи видны имя `wrapper`, пустая документация и сигнатура `(*args, **kwargs)`. Что от этого ломается:
@@ -48,7 +125,40 @@ print(charge.__name__, charge.__doc__)  # wrapper None
 - Celery и pickle находят функцию по имени (`__qualname__`) и с чужим именем не находят;
 - `help()` и IDE не показывают документацию и подсказки.
 
-`functools.wraps(func)` — это тоже декоратор, он копирует на обёртку `__name__`, `__qualname__`, `__doc__`, `__module__`, `__annotations__`, `__type_params__`, дополняет `__dict__` и кладёт ссылку на оригинал в `__wrapped__`. Функция `inspect.signature` идёт по `__wrapped__` до исходной функции, поэтому FastAPI и IDE видят настоящие параметры, а в тестах до исходной функции можно добраться через `charge.__wrapped__`. Правило простое: `@functools.wraps(func)` есть в каждом декораторе, который возвращает обёртку.
+`functools.wraps(func)` — это тоже декоратор, он копирует на обёртку `__name__`, `__qualname__`, `__doc__`, `__module__`, `__annotations__`, `__type_params__`, дополняет `__dict__` и кладёт ссылку на оригинал в `__wrapped__`. Функция `inspect.signature` идёт по `__wrapped__` до исходной функции, поэтому FastAPI и IDE видят настоящие параметры, а в тестах до исходной функции можно добраться через `charge.__wrapped__`. Правило простое: `@functools.wraps(func)` есть в каждом декораторе, который возвращает обёртку. Сравнение наивной обёртки и обёртки с `wraps`:
+
+```python
+import functools
+import inspect
+
+
+def naive(func):
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def good(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def charge(user_id: int, amount: int = 0) -> None:
+    """Списать деньги."""
+
+
+for w in (naive(charge), good(charge)):
+    print(w.__name__, w.__doc__, inspect.signature(w), hasattr(w, "__wrapped__"))
+```
+
+```text title="Вывод"
+wrapper None (*args, **kwargs) False
+charge Списать деньги. (user_id: int, amount: int = 0) -> None True
+```
 
 ### Пример: логгер времени выполнения
 
@@ -298,8 +408,13 @@ while True:
 
 ```python
 squares = (x * x for x in range(5))
-print(sum(squares))  # 30
-print(sum(squares))  # 0 — итератор уже исчерпан, ошибки нет
+print(sum(squares))
+print(sum(squares))  # итератор уже исчерпан, ошибки нет
+```
+
+```text title="Вывод"
+30
+0
 ```
 
 Эта ловушка встречается в реальном коде: генератор передали в две функции, вторая молча получила пустоту. Ещё `x in iterator` поглощает элементы до найденного, а `len()` у итератора нет.
@@ -333,7 +448,11 @@ class CountdownIterator:
         return self.current + 1
 
 
-print(list(Countdown(3)), list(Countdown(3)))  # [3, 2, 1] [3, 2, 1]
+print(list(Countdown(3)), list(Countdown(3)))
+```
+
+```text title="Вывод"
+[3, 2, 1] [3, 2, 1]
 ```
 
 То же самое генератором:
@@ -345,10 +464,34 @@ def countdown(start: int):
         start -= 1
 
 
-print(list(countdown(3)))  # [3, 2, 1]
+print(list(countdown(3)))
 ```
 
-**Генератор** — функция с `yield` внутри. Вызов такой функции не выполняет её тело, а возвращает объект-генератор, который является итератором. При каждом `next()` тело выполняется до следующего `yield`, отдаёт значение и замирает: локальные переменные и позиция сохраняются в кадре стека (frame) генератора. Когда функция доходит до конца или до `return`, генератор бросает `StopIteration`.
+```text title="Вывод"
+[3, 2, 1]
+```
+
+**Генератор** — функция с `yield` внутри. Вызов такой функции не выполняет её тело, а возвращает объект-генератор, который является итератором. При каждом `next()` тело выполняется до следующего `yield`, отдаёт значение и замирает: локальные переменные и позиция сохраняются в кадре стека (frame) генератора. Когда функция доходит до конца или до `return`, генератор бросает `StopIteration`. Пошагово, на `countdown(2)`:
+
+```python
+g = countdown(2)
+print(next(g))
+print(next(g))
+try:
+    next(g)
+except StopIteration as e:
+    print("StopIteration", repr(e.value))
+print(list(g))            # исчерпанный генератор пуст, ошибки нет
+print(next(g, "пусто"))   # значение по умолчанию вместо StopIteration
+```
+
+```text title="Вывод"
+2
+1
+StopIteration None
+[]
+пусто
+```
 
 Генератор — самый короткий способ написать итератор: Python сам создаёт `__iter__` и `__next__` и сам хранит состояние. Чтобы сделать многоразовый итерируемый класс, достаточно написать `__iter__` генератором:
 
@@ -424,7 +567,12 @@ def outer():
     print("inner вернул", result)
 
 
-print(list(outer()))  # inner вернул done, затем [1, 2]
+print(list(outer()))
+```
+
+```text title="Вывод"
+inner вернул done
+[1, 2]
 ```
 
 - **`gen.send(value)`** продолжает генератор и передаёт значение внутрь: выражение `yield` возвращает то, что прислали. Первый вызов — `next(gen)` или `send(None)`, чтобы дойти до первого `yield`.
@@ -442,12 +590,64 @@ def running_avg():
 
 g = running_avg()
 next(g)              # дойти до первого yield
-print(g.send(10))    # 10.0
-print(g.send(20))    # 15.0
+print(g.send(10))
+print(g.send(20))
+```
+
+```text title="Вывод"
+10.0
+15.0
 ```
 
 - **`gen.throw(exc)`** бросает исключение внутри генератора, в точке, где стоит `yield`. **`gen.close()`** бросает туда `GeneratorExit`, чтобы выполнились блоки `finally` и `with`. Сборщик мусора вызывает `close()` сам, когда генератор больше никому не нужен.
-- `return value` в генераторе превращается в `StopIteration(value)`. А если внутри генератора случайно вылетает `StopIteration` (например, из `next()` без значения по умолчанию), Python превращает его в `RuntimeError` — иначе генератор молча закончился бы раньше времени (PEP 479).
+Где срабатывают `throw`, `close` и `finally`:
+
+```python
+def worker():
+    try:
+        while True:
+            try:
+                x = yield
+                print("получил", x)
+            except ValueError as e:
+                print("поймал", e)
+    finally:
+        print("finally: освобождаем ресурс")
+
+
+w = worker()
+next(w)
+w.send("a")
+w.throw(ValueError("плохое значение"))  # поймано внутри, генератор жив
+w.close()                                # GeneratorExit -> finally
+try:
+    w.send("b")
+except StopIteration:
+    print("после close генератор мёртв")
+```
+
+```text title="Вывод"
+получил a
+поймал плохое значение
+finally: освобождаем ресурс
+после close генератор мёртв
+```
+
+- `return value` в генераторе превращается в `StopIteration(value)`. А если внутри генератора случайно вылетает `StopIteration` (например, из `next()` без значения по умолчанию), Python превращает его в `RuntimeError` — иначе генератор молча закончился бы раньше времени (PEP 479):
+
+```python
+def bad():
+    yield 1
+    next(iter([]))  # StopIteration изнутри генератора
+
+
+list(bad())
+```
+
+```text title="Вывод"
+RuntimeError: generator raised StopIteration
+```
+
 
 `send` и `yield from` — исторический фундамент async: до Python 3.5 корутины писали генераторами (`@asyncio.coroutine` и `yield from`), а `await` устроен почти как `yield from`. Подробно, с игрушечным циклом событий, — в [[Python-конкурентность#Async под капотом]].
 
@@ -590,13 +790,94 @@ with Timer() as t, Transaction(conn) as tx:
 print(f"{t.elapsed:.6f} s")
 ```
 
+Порядок вызовов и то, что видит `__exit__`:
+
+```python
+class Res:
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        print("enter", self.name)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        print("exit", self.name, exc_type, exc, type(tb).__name__)
+        return False
+
+
+with Res("a"), Res("b"):
+    print("тело")
+
+try:
+    with Res("a"), Res("b"):
+        raise KeyError("k")
+except KeyError as e:
+    print("снаружи поймали", repr(e))
+```
+
+```text title="Вывод"
+enter a
+enter b
+тело
+exit b None None NoneType
+exit a None None NoneType
+enter a
+enter b
+exit b <class 'KeyError'> 'k' traceback
+exit a <class 'KeyError'> 'k' traceback
+снаружи поймали KeyError('k')
+```
+
+Если `__exit__` вернёт `True`, исключение исчезает, а выполнение продолжается после `with`:
+
+```python
+class Quiet(Res):
+    def __exit__(self, *args):
+        super().__exit__(*args)
+        return True
+
+
+with Quiet("q"):
+    1 / 0
+print("после with: программа продолжается")
+```
+
+```text title="Вывод"
+enter q
+exit q <class 'ZeroDivisionError'> division by zero traceback
+после with: программа продолжается
+```
+
 Тонкости, которые проверяют:
 
 - **Если упал `__enter__`, `__exit__` не вызывается.** Блок `with` ещё не начался. Поэтому `__enter__` должен либо захватить всё, либо ничего: если он открыл два соединения и упал на третьем, первые два нужно закрыть внутри самого `__enter__` (или собрать их через `ExitStack`, см. ниже).
 - **Возвращать `True` из `__exit__` опасно**: так менеджер глотает любые ошибки блока, включая опечатки в коде. Подавлять стоит только конкретное ожидаемое исключение, как делает `contextlib.suppress`.
-- **Исключение внутри `__exit__` заменяет исходное.** Исходное не теряется полностью, оно сохраняется в `__context__` нового исключения и видно в стеке как «During handling of the above exception...», но ловить будут уже новое.
+- **Исключение внутри `__exit__` заменяет исходное.** Исходное не теряется полностью, оно сохраняется в `__context__` нового исключения и видно в стеке как «During handling of the above exception...», но ловить будут уже новое (пример ниже).
 - **Несколько менеджеров в одном `with`** открываются слева направо, закрываются в обратном порядке. С Python 3.10 их можно перечислить в скобках на нескольких строках.
 - **Многоразовость.** Объект файла и менеджер из `@contextmanager` одноразовые; `threading.Lock` многоразовый, но не реентерабельный (повторный вход из того же потока — взаимная блокировка, deadlock); `threading.RLock` реентерабельный.
+
+Исключение из `__exit__` вытесняет исходное:
+
+```python
+class BadExit:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        raise RuntimeError("упал exit")
+
+
+try:
+    with BadExit():
+        raise ValueError("исходная")
+except RuntimeError as e:
+    print(repr(e), "| __context__ =", repr(e.__context__))
+```
+
+```text title="Вывод"
+RuntimeError('упал exit') | __context__ = ValueError('исходная')
+```
 
 ### Асинхронный контекстный менеджер
 
@@ -661,6 +942,44 @@ job()
 - чтобы подавить исключение, его ловят вокруг `yield` и не пробрасывают дальше;
 - два `yield` — ошибка `RuntimeError: generator didn't stop`.
 
+Разница с `try/finally` и без него, при исключении в блоке:
+
+```python
+from contextlib import contextmanager
+
+
+@contextmanager
+def no_finally(name):
+    print("открыл", name)
+    yield
+    print("закрыл", name)
+
+
+@contextmanager
+def with_finally(name):
+    print("открыл", name)
+    try:
+        yield
+    finally:
+        print("закрыл", name)
+
+
+for cm in (no_finally, with_finally):
+    try:
+        with cm("res"):
+            raise ValueError("упало в блоке")
+    except ValueError as e:
+        print("  исключение:", e)
+```
+
+```text title="Вывод"
+открыл res
+  исключение: упало в блоке
+открыл res
+закрыл res
+  исключение: упало в блоке
+```
+
 Объект, который создаёт `@contextmanager`, наследует `ContextDecorator`, поэтому менеджер можно повесить на функцию как декоратор (пример с `job` выше): при каждом вызове создаётся новый менеджер. На асинхронную функцию так вешать нельзя — синхронный менеджер обернёт только создание корутины, как в разделе про декораторы.
 
 Асинхронный вариант — `@asynccontextmanager`: генератор с `async def`, внутри можно `await`.
@@ -707,6 +1026,13 @@ async def main():
 asyncio.run(main())
 ```
 
+```text title="Вывод"
+BEGIN
+INSERT ...
+COMMIT
+released
+```
+
 Здесь `except BaseException` уместен: при отмене задачи (`CancelledError`) транзакцию тоже нужно откатить, а голый `raise` пробрасывает исключение дальше и ничего не глотает.
 
 ### ExitStack: сколько ресурсов — неизвестно заранее
@@ -723,6 +1049,39 @@ def merge(paths: list[str], out_path: str) -> None:
         out = stack.enter_context(open(out_path, "w", encoding="utf-8"))
         for f in files:
             out.writelines(f)
+```
+
+Порядок закрытия, включая `callback`:
+
+```python
+from contextlib import ExitStack, contextmanager
+
+
+@contextmanager
+def res(name):
+    print("open", name)
+    try:
+        yield name
+    finally:
+        print("close", name)
+
+
+with ExitStack() as stack:
+    for n in ["a", "b", "c"]:
+        stack.enter_context(res(n))
+    stack.callback(print, "callback")
+    print("тело")
+```
+
+```text title="Вывод"
+open a
+open b
+open c
+тело
+callback
+close c
+close b
+close a
 ```
 
 Если третий файл не открылся, первые два закроются. Ещё у стека есть `stack.callback(fn, *args)` — зарегистрировать любую функцию очистки, и `stack.pop_all()` — забрать накопленные ресурсы в новый стек и не закрывать их сейчас. Последнее нужно для `__enter__`, который захватывает несколько ресурсов: при ошибке на середине стек закроет захваченное, а при успехе ресурсы передаются объекту и закроются в его `__exit__`. Асинхронный вариант — `AsyncExitStack` с `enter_async_context`.

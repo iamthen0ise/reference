@@ -26,6 +26,41 @@ def type_call(cls, *args, **kwargs):
 - **`__init__(self, ...)`** получает уже созданный объект и заполняет его атрибутами. Должен вернуть `None`; если вернуть что-то другое — `TypeError`.
 - Если `__new__` вернул объект **не этого класса** (например, кэшированный объект другого типа или `None`), `__init__` не вызывается.
 
+Порядок вызовов и случай, когда `__init__` пропускается:
+
+```python
+class Point:
+    def __new__(cls, x, y):
+        print("__new__", cls.__name__, x, y)
+        return super().__new__(cls)
+
+    def __init__(self, x, y):
+        print("__init__", x, y)
+        self.x, self.y = x, y
+
+
+p = Point(1, 2)
+
+
+class Fake:
+    def __new__(cls):
+        print("__new__")
+        return 42  # не экземпляр Fake
+
+    def __init__(self):
+        print("__init__")  # не будет вызван
+
+
+print(Fake())
+```
+
+```text title="Вывод"
+__new__ Point 1 2
+__init__ 1 2
+__new__
+42
+```
+
 Переопределять `__new__` нужно редко. Типичные случаи:
 
 - **Наследование от неизменяемого типа** (`int`, `float`, `str`, `tuple`, `frozenset`). Значение такого объекта задаётся в момент создания, и в `__init__` его уже не поменять.
@@ -68,7 +103,11 @@ class Settings:
 
 a = Settings("prod")
 b = Settings("test")
-print(a is b, a.env)  # True test — первый объект тихо перезаписан
+print(a is b, a.env)  # первый объект тихо перезаписан
+```
+
+```text title="Вывод"
+True test
 ```
 
 `__new__` возвращает тот же объект, он того же класса, значит `type.__call__` каждый раз заново вызывает `__init__` и сбрасывает состояние. Варианты лучше:
@@ -90,7 +129,11 @@ class Settings(metaclass=SingletonMeta):
         self.env = env
 
 
-print(Settings("prod") is Settings("test"), Settings().env)  # True prod
+print(Settings("prod") is Settings("test"), Settings().env)
+```
+
+```text title="Вывод"
+True prod
 ```
 
 - **проще и чаще в реальном коде** — объект на уровне модуля (`settings = Settings()`; модуль импортируется один раз, и все получают один объект) или функция-фабрика с `@functools.cache`, как `get_settings()` во FastAPI. Такой объект легко подменить в тесте.
@@ -140,7 +183,43 @@ class PaymentCreated(Handler, event="payment.created"):
     pass
 
 
-print(Handler.registry)  # {'payment.created': <class 'PaymentCreated'>}
+print(Handler.registry)
+```
+
+```text title="Вывод"
+{'payment.created': <class '__main__.PaymentCreated'>}
+```
+
+Хук срабатывает в момент выполнения `class`-блока, а не при создании экземпляра; обязательный `event` проверяется там же:
+
+```python
+class Handler:
+    def __init_subclass__(cls, *, event: str, **kwargs):
+        super().__init_subclass__(**kwargs)
+        print("зарегистрирован", cls.__name__)
+
+
+print("до объявления")
+
+
+class PaymentCreated(Handler, event="payment.created"):
+    pass
+
+
+print("после объявления")
+
+try:
+    class Bad(Handler):  # event не передан
+        pass
+except TypeError as e:
+    print(e)
+```
+
+```text title="Вывод"
+до объявления
+зарегистрирован PaymentCreated
+после объявления
+Handler.__init_subclass__() missing 1 required keyword-only argument: 'event'
 ```
 
 | Метод | Чей | Когда вызывается | Что возвращает |
@@ -174,8 +253,13 @@ class D(B, C):
     pass
 
 
-print([k.__name__ for k in D.__mro__])  # ['D', 'B', 'C', 'A', 'object']
-print(D().hello())                      # C
+print([k.__name__ for k in D.__mro__])
+print(D().hello())
+```
+
+```text title="Вывод"
+['D', 'B', 'C', 'A', 'object']
+C
 ```
 
 Если бы поиск шёл простым обходом в глубину слева направо, порядок был бы `D, B, A, C, A`: метод нашёлся бы в `A` раньше, чем в `C`, и переопределение в `C` никогда бы не сработало. Так было у «классических» классов в Python 2. С Python 2.3 MRO вычисляется **C3-линеаризацией**, которая гарантирует три свойства:
@@ -221,7 +305,11 @@ class B(A): pass
 try:
     class C(A, B): pass  # A объявлен раньше B, но B — потомок A и должен быть раньше
 except TypeError as e:
-    print(e)  # Cannot create a consistent method resolution order (MRO) for bases A, B
+    print(e)
+```
+
+```text title="Вывод"
+Cannot create a consistent method resolution order (MRO) for bases A, B
 ```
 
 `merge([A, O], [B, A, O], [A, B])`: голова `A` есть в хвосте `[B, A, O]`, голова `B` — в хвосте `[A, B]`, третий список снова начинается с `A`. Подходящей головы нет. Та же ошибка будет, если `X(A, B)` и `Y(B, A)` наследуются вместе: `class Z(X, Y)`.
@@ -264,9 +352,12 @@ class K2(D, B, E): pass
 class K3(D, A): pass
 class Z(K1, K2, K3): pass
 
-print([k.__name__ for k in c3_mro(Z)][:-1])
-# ['Z', 'K1', 'K2', 'K3', 'D', 'A', 'B', 'C', 'E', 'O']
+print([k.__name__ for k in c3_mro(Z)])
 assert c3_mro(Z) == list(Z.__mro__)
+```
+
+```text title="Вывод"
+['Z', 'K1', 'K2', 'K3', 'D', 'A', 'B', 'C', 'E', 'O']
 ```
 
 Сложность — O(n²) и выше по числу классов, но иерархии маленькие, а MRO вычисляется один раз при создании класса и хранится в `__mro__`.
@@ -296,11 +387,77 @@ class D(B, C):
         return ["D", *super().hello()]
 
 
-print(D().hello())  # ['D', 'B', 'C', 'A'] — A ровно один раз
-print(B().hello())  # ['B', 'A'] — у объекта B другой MRO, и super() в B ведёт в A
+print(D().hello())  # A ровно один раз
+print(B().hello())  # у объекта B другой MRO, и super() в B ведёт в A
 ```
 
-Благодаря этому каждый метод выполняется ровно один раз, даже если до класса можно дойти несколькими путями. Если бы `B` вызывал `A.hello(self)` напрямую, `C.hello` был бы пропущен, а в более сложной иерархии `A` вызвался бы дважды.
+```text title="Вывод"
+['D', 'B', 'C', 'A']
+['B', 'A']
+```
+
+Благодаря этому каждый метод выполняется ровно один раз, даже если до класса можно дойти несколькими путями. Если бы `B` вызывал `A.hello(self)` напрямую, `C.hello` был бы пропущен, а в более сложной иерархии `A` вызвался бы дважды. Порядок вызовов с печатью (`D(B, C)`, у каждого `hello` вызывает `super().hello()` между двумя `print`):
+
+```python
+class A:
+    def hello(self):
+        print("A.hello")
+
+
+class B(A):
+    def hello(self):
+        print("B.hello: до")
+        super().hello()
+        print("B.hello: после")
+
+
+class C(A):
+    def hello(self):
+        print("C.hello: до")
+        super().hello()
+        print("C.hello: после")
+
+
+class D(B, C):
+    def hello(self):
+        print("D.hello: до")
+        super().hello()
+        print("D.hello: после")
+
+
+D().hello()
+```
+
+```text title="Вывод"
+D.hello: до
+B.hello: до
+C.hello: до
+A.hello
+C.hello: после
+B.hello: после
+D.hello: после
+```
+
+Вызовы идут вперёд по MRO (`D, B, C, A`) и возвращаются назад. Если `B` вызывает `A.hello(self)` напрямую, `C.hello` не выполнится совсем:
+
+```python
+class B2(A):
+    def hello(self):
+        print("B2.hello")
+        A.hello(self)  # в обход MRO
+
+
+class D2(B2, C):
+    pass
+
+
+D2().hello()
+```
+
+```text title="Вывод"
+B2.hello
+A.hello
+```
 
 Чтобы цепочка работала, классы должны **кооперироваться**:
 
@@ -331,8 +488,22 @@ class UserRepo(LoggingMixin, CacheMixin, Storage):
 
 
 repo = UserRepo(dsn="postgresql://localhost/app", ttl=30)
-print([k.__name__ for k in UserRepo.__mro__])  # UserRepo, LoggingMixin, CacheMixin, Storage, object
+print([k.__name__ for k in UserRepo.__mro__])
 print(repo.dsn, repo.ttl, repo.logger_name)
+```
+
+```text title="Вывод"
+['UserRepo', 'LoggingMixin', 'CacheMixin', 'Storage', 'object']
+postgresql://localhost/app 30 app
+```
+
+Опечатка в имени аргумента проходит через все `**kwargs` и падает только в самом конце цепочки, в `object.__init__` (здесь в каждом `__init__` добавлена печать имени класса перед `super().__init__`, `UserRepo(dsn="x", typo=1)`):
+
+```text title="Вывод"
+LoggingMixin
+CacheMixin
+Storage
+TypeError: object.__init__() takes exactly one argument (the instance to initialize)
 ```
 
 **Миксин** (mixin, «примесь») — маленький класс, который добавляет одну возможность и сам по себе не используется. Миксины ставят **левее** основного класса: тогда их методы оказываются раньше в MRO и могут обернуть метод основного класса через `super()`. Так устроены class-based views в Django (`LoginRequiredMixin, ListView`).
@@ -350,11 +521,88 @@ print(repo.dsn, repo.ttl, repo.logger_name)
 3. Иначе, если на шаге 1 нашёлся **дескриптор не-данных**, вызываем его `__get__`; если нашёлся обычный атрибут класса — возвращаем его.
 4. Ничего нет — вызываем `__getattr__`, если он определён, иначе `AttributeError`.
 
+Приоритеты на деле: в `__dict__` экземпляра вручную положены значения под теми же именами, что у дескриптора данных, дескриптора не-данных и обычного метода.
+
+```python
+class Data:
+    def __get__(self, obj, owner=None):
+        return "дескриптор данных"
+
+    def __set__(self, obj, value):
+        print("__set__", value)
+
+
+class NonData:
+    def __get__(self, obj, owner=None):
+        return "дескриптор не-данных"
+
+
+class T:
+    d = Data()
+    n = NonData()
+
+    def method(self):
+        return "метод"
+
+
+t = T()
+t.__dict__.update(d="из __dict__", n="из __dict__", method="из __dict__")
+print(t.d)       # дескриптор данных выигрывает у __dict__
+print(t.n)       # __dict__ выигрывает у не-данных
+print(t.method)  # функция — тоже не-данных, метод затенён
+t.d = 5          # присваивание тоже уходит в __set__
+print(t.__dict__["d"])
+```
+
+```text title="Вывод"
+дескриптор данных
+из __dict__
+из __dict__
+__set__ 5
+из __dict__
+```
+
 Что из этого следует:
 
 - **Функция — дескриптор не-данных.** `obj.method` находит функцию в классе и вызывает её `__get__`, который возвращает связанный метод (bound method) с уже подставленным `self`. Поэтому методы получают `self`, а `staticmethod` и `classmethod` — это дескрипторы, которые подставляют ничего или класс.
 - **`property` — дескриптор данных**, поэтому `obj.__dict__["x"] = 1` не перекроет свойство `x`.
 - **`functools.cached_property` — дескриптор не-данных.** При первом обращении он вычисляет значение и кладёт его в `obj.__dict__`, и дальше шаг 2 находит значение раньше шага 3, дескриптор больше не вызывается. Поэтому ему нужен `__dict__`, и со `__slots__` он не работает.
+- Разницу `property` и `cached_property` видно по `__dict__`:
+
+```python
+import functools
+
+
+class U:
+    @property
+    def p(self):
+        return "property"
+
+    @functools.cached_property
+    def c(self):
+        print("считаем")
+        return "cached"
+
+
+u = U()
+u.__dict__["p"] = "из __dict__"
+print(u.p)
+print(u.c, u.c)
+print(u.__dict__)
+try:
+    u.p = 1
+except AttributeError as e:
+    print(e)
+```
+
+```text title="Вывод"
+property
+считаем
+cached cached
+{'p': 'из __dict__', 'c': 'cached'}
+property 'p' of 'U' object has no setter
+```
+
 - **`__getattr__` вызывается только для отсутствующих атрибутов**, а `__getattribute__` — для всех обращений; переопределять последний опасно, легко уйти в бесконечную рекурсию.
 
 Отсюда же решение для класса-декоратора на методе из [[Python-протоколы#Класс как декоратор и декоратор класса]]: экземпляр класса без `__get__` не привязывается к объекту, и `self` теряется. Добавляем `__get__`, как у функций:
@@ -406,7 +654,11 @@ p = Point(1, 2)
 try:
     p.z = 3
 except AttributeError as e:
-    print(e)  # 'Point' object has no attribute 'z' and no __dict__ for setting new attributes
+    print(e)
+```
+
+```text title="Вывод"
+'Point' object has no attribute 'z' and no __dict__ for setting new attributes
 ```
 
 Что даёт:
@@ -424,11 +676,57 @@ except AttributeError as e:
 - **Защита от опечаток**: `p.lenght = 5` упадёт сразу, а не создаст тихо новый атрибут.
 - **Чуть быстрее доступ к атрибутам**, но разница маленькая, и ради скорости слоты не ставят.
 
+Замер `tracemalloc` на Python 3.15: 100 000 объектов с тремя атрибутами, средний размер объекта в байтах. `Sub` — подкласс без своего `__slots__`.
+
+```python
+import tracemalloc
+
+
+class Plain:
+    def __init__(self):
+        self.a = self.b = self.c = 1
+
+
+class Slots:
+    __slots__ = ("a", "b", "c")
+
+    def __init__(self):
+        self.a = self.b = self.c = 1
+
+
+class Sub(Slots):  # своего __slots__ нет
+    pass
+
+
+def measure(cls, n=100_000):
+    tracemalloc.start()
+    objs = [cls() for _ in range(n)]
+    current, _ = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return current // n
+
+
+print(measure(Plain), measure(Slots), measure(Sub))
+print(hasattr(Slots(), "__dict__"), hasattr(Sub(), "__dict__"))
+
+sub = Sub()
+sub.anything = 1  # у подкласса словарь вернулся
+print(sub.__dict__)
+```
+
+```text title="Вывод"
+104 64 112
+False True
+{'anything': 1}
+```
+
+`sys.getsizeof` для такого сравнения не годится: он меряет только сам объект, без отдельно выделенного хранилища атрибутов (`__dict__`, а с 3.11 — массива значений атрибутов), и показывает для `Plain` меньше, чем реально занято. `tracemalloc` считает все выделения; в число на объект входят и 8 байт его указателя в списке `objs`.
+
 Ловушки:
 
 - **Наследование.** Подкласс без своего `__slots__` снова получает `__dict__`, и вся экономия пропадает. В каждом классе иерархии объявляют `__slots__` только с новыми полями: повторять поля родителя не нужно, это только тратит память.
 - **Множественное наследование.** Два родителя с непустыми `__slots__` несовместимы: `TypeError: multiple bases have instance lay-out conflict`. Поэтому у миксинов делают `__slots__ = ()`.
-- **Нельзя задать значение по умолчанию атрибутом класса** с тем же именем: `x = 0` рядом с `__slots__ = ("x",)` даёт `ValueError: 'x' in __slots__ conflicts with class variable`. Значения по умолчанию — в `__init__` (или через `dataclass`, он это делает сам).
+- **Нельзя задать значение по умолчанию атрибутом класса** с тем же именем: `x = 0` рядом с `__slots__ = ("x",)` даёт `ValueError` (`'x' in __slots__ conflicts with class variable`). Значения по умолчанию — в `__init__` (или через `dataclass`, он это делает сам).
 - **Нет `__dict__`**, а значит, не работают `cached_property`, `vars(obj)` и библиотеки, которые пишут в `__dict__`. Нет слабых ссылок, пока `"__weakref__"` не добавлен в слоты, а слабые ссылки нужны, например, `WeakValueDictionary` и некоторым кэшам.
 - **Обычный способ сегодня — `@dataclass(slots=True)`** (Python 3.10+): поля и значения по умолчанию пишутся как обычно, а слоты dataclass создаёт сам. Учтите, что декоратор при этом создаёт новый класс вместо исходного.
 

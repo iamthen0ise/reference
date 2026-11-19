@@ -1,0 +1,391 @@
+---
+title: "Python: деньги, float и Decimal"
+---
+
+Конспект к собеседованию по деньгам в Python: почему `float` для них не годится, как округляют `round` и `Decimal`, что на самом деле делает контекст `decimal` (в том числе в asyncio), как хранить сумму и делить её без потери копейки, как `Decimal` ходит через pydantic v2 и что с ним делает PostgreSQL. Все выводы получены запуском на Python 3.15 и pydantic 2.14, версионные отличия оговорены в тексте.
+Рядом: [[Python-конкурентность#asyncio на практике|ContextVar и задачи asyncio]] · [[Транзакции и уровни изоляции]].
+Разделы: [[#Почему float не годится]] · [[#Округление]] · [[#Контекст decimal]] · [[#Ловушки Decimal]] · [[#Хранение и распределение суммы]] · [[#Pydantic v2]] · [[#PostgreSQL]] · [[#Что спросят дальше]]
+
+**Суть.** `float` — двоичная дробь (IEEE 754, 53 бита мантиссы). `0.1` в двоичной системе периодическая, как `1/3` в десятичной, поэтому хранится приближённо. Для денег нужна точная десятичная арифметика: либо `Decimal`, либо целые в минимальных единицах (копейки, центы). Правило: суммы считают в `Decimal`, строят `Decimal` из строки, округляют один раз и явным режимом, хранят и передают по сети точно (строка или целое), а `float` не используют нигде на пути суммы.
+
+## Почему float не годится
+
+```python
+print(0.1 + 0.2)
+print(0.1 + 0.2 == 0.3)
+print(round(2.675, 2))
+```
+
+```text title="Вывод"
+0.30000000000000004
+False
+2.67
+```
+
+`round(2.675, 2)` даёт `2.67`, а не `2.68`: ближайшее к `2.675` значение `float` чуть меньше его, и округление честно идёт вниз.
+
+Что на самом деле лежит в `float`, видно через `Decimal`:
+
+```python
+from decimal import Decimal
+
+print(Decimal(2.675))
+print(Decimal(0.1), Decimal("0.1"))
+```
+
+```text title="Вывод"
+2.67499999999999982236431605997495353221893310546875
+0.1000000000000000055511151231257827021181583404541015625 0.1
+```
+
+`Decimal(0.1)` не лечит проблему: конструктор точно копирует уже испорченное `float`. Создавать надо из строки (`Decimal("0.1")`) или из целого.
+
+Ошибка накапливается при суммировании:
+
+```python
+import math
+
+t = 0.0
+for _ in range(1_000_000):
+    t += 0.1
+print(t)
+print(sum([0.1] * 10), math.fsum([0.1] * 1_000_000))
+```
+
+```text title="Вывод"
+100000.00000133288
+1.0 100000.0
+```
+
+- Цикл с `+=` теряет точность: после миллиона слагаемых набежало `0.0000013`.
+- Встроенный `sum` на списке `float` с Python 3.12 использует компенсированное суммирование (Нэймайер) и даёт `1.0`; раньше было `0.9999999999999999`. Полагаться на это нельзя: цикл с `+=` компенсации не получает.
+- `math.fsum` суммирует точно и округляет один раз в конце, но не знает про копейки и режимы округления, а входные `0.1` уже неточны. Это не замена `Decimal`.
+
+## Округление
+
+У `round()` для `float` и у `Decimal.quantize` по умолчанию режим `ROUND_HALF_EVEN` («банковское округление»): ровно половина уходит к ближайшему чётному. Так среднее смещение ошибки равно нулю, а при `ROUND_HALF_UP` («как в школе») все половинки уходят вверх и итог систематически завышается.
+
+```python
+print([round(x) for x in (0.5, 1.5, 2.5, 3.5)])
+```
+
+```text title="Вывод"
+[0, 2, 2, 4]
+```
+
+Для денег в большинстве правил (налоги, чеки, тарифы) требуется `ROUND_HALF_UP`: половина копейки округляется вверх. Режим указывают явно:
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+cent = Decimal("0.01")
+for v in ("0.125", "0.135", "2.675"):
+    d = Decimal(v)
+    print(v, d.quantize(cent), d.quantize(cent, rounding=ROUND_HALF_UP))
+```
+
+```text title="Вывод"
+0.125 0.12 0.13
+0.135 0.14 0.14
+2.675 2.68 2.68
+```
+
+Разница видна только на точных половинках, где предыдущая цифра чётная: `0.125` → `0.12` и `0.13`. На `0.135` и `2.675` оба режима совпали, потому что соседняя цифра нечётная. `quantize` принимает «образец» экспоненты (`Decimal("0.01")`), а не число знаков.
+
+**Когда округлять.** Один раз в конце расчёта, а не после каждого шага: ошибки округления складываются.
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+cent = Decimal("0.01")
+price = Decimal("0.10")
+vat = Decimal("0.075")
+
+per_item = (price * (1 + vat)).quantize(cent, ROUND_HALF_UP)
+print(per_item * 3)
+print((price * 3 * (1 + vat)).quantize(cent, ROUND_HALF_UP))
+```
+
+```text title="Вывод"
+0.33
+0.32
+```
+
+Округление цены каждой позиции (`0.1075` → `0.11`) и сумма трёх даёт `0.33`, а округление итога `0.3225` — `0.32`. Какой вариант правильный, решает бизнес-правило (чек считают по строкам или по итогу), но выбирают его осознанно и один раз, а не получают случайно.
+
+## Контекст decimal
+
+Арифметика `Decimal` идёт по контексту (`decimal.getcontext()`): точность `prec`, режим округления `rounding`, границы экспоненты, ловушки сигналов. По умолчанию `prec=28`.
+
+```python
+from decimal import Decimal, localcontext
+
+print(Decimal(1) / Decimal(3), Decimal("1234567.891") * 1)
+
+with localcontext() as ctx:
+    ctx.prec = 4
+    print(Decimal(1) / Decimal(3), Decimal("1234567.891") + 0)
+```
+
+```text title="Вывод"
+0.3333333333333333333333333333 1234567.891
+0.3333 1.235E+6
+```
+
+`prec` (28 по умолчанию) — число **значащих цифр результата арифметики**, а не знаков после запятой. Само число `Decimal` хранит все цифры, с которыми его создали (`Decimal("1234567.891") * 1` ничего не потеряло), округление до `prec` происходит только в результате операции. Поэтому `prec` не заменяет `quantize`: чтобы получить копейки, нужен `quantize(Decimal("0.01"))`. Слишком маленький `prec` ломает деньги иначе: при `prec=4` сумма `1234567.891 + 0` превратилась в `1.235E+6`.
+
+`localcontext()` меняет контекст только внутри `with` и возвращает прежний на выходе. Менять `getcontext().prec = ...` напрямую в библиотечном коде нельзя: это правка общего состояния.
+
+### Контекст и asyncio
+
+С Python 3.7 текущий контекст хранится в `ContextVar`, поэтому у каждого потока и каждой задачи asyncio контекст свой. Но есть тонкость: `ContextVar` хранит ссылку на **изменяемый** объект `Context`. Если в главном потоке контекст уже создан (`getcontext()` вызвали до запуска задач), то задачи при создании копируют переменные контекста поверхностно и получают ту же ссылку на тот же `Context`.
+
+```python
+# ctx_shared.py
+import asyncio
+from decimal import getcontext
+
+async def worker(name, prec):
+    getcontext().prec = prec
+    await asyncio.sleep(0.01)
+    print(name, getcontext().prec)
+
+async def main():
+    await asyncio.gather(worker("a", 5), worker("b", 10))
+    print("main", getcontext().prec)
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+a 5
+b 10
+main 28
+```
+
+Если перед `asyncio.run` добавить в главном потоке строку `getcontext()`, вывод станет `a 10`, `b 10`, `main 10`. Задача `a` выставила `prec=5`, но после `sleep` увидела `10` от `b`, а главная часть тоже получила `10`. В первом запуске контекст создавался заново внутри каждой задачи и они были изолированы. Правильный способ изолировать расчёт — заменять объект целиком, а не менять поле:
+
+```python
+import asyncio
+from decimal import Decimal, getcontext, setcontext, Context
+
+getcontext()
+
+async def worker(name, prec):
+    setcontext(Context(prec=prec))
+    await asyncio.sleep(0.01)
+    print(name, getcontext().prec, Decimal(1) / Decimal(7))
+
+async def main():
+    await asyncio.gather(worker("a", 5), worker("b", 10))
+    print("main", getcontext().prec)
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+a 5 0.14286
+b 10 0.1428571429
+main 28
+```
+
+`setcontext` пишет новое значение в `ContextVar` внутри задачи и не трогает чужие. Практическое правило: `prec` не трогают вообще (28 цифр хватает на деньги), для особых расчётов используют `localcontext()`, а точность по копейкам задаёт `quantize`.
+
+## Ловушки Decimal
+
+**`InvalidOperation` в `quantize`.** Если результат не помещается в `prec` цифр, `quantize` бросает исключение, а не молча округляет:
+
+```python
+from decimal import Decimal, InvalidOperation
+
+try:
+    Decimal("1e30").quantize(Decimal("0.01"))
+except InvalidOperation as e:
+    print(type(e).__name__, e)
+```
+
+```text title="Вывод"
+InvalidOperation [<class 'decimal.InvalidOperation'>]
+```
+
+`1e30` с двумя знаками после запятой — это 33 значащие цифры, больше 28. На практике так падает `quantize` на мусорных данных (`1e30` пришло от клиента) и не защищённом от размера значении; валидировать верхнюю границу надо до арифметики.
+
+**Сравнение с `float`.** `Decimal` сравнивается с `float` по точному значению, поэтому `0.1` не равно `Decimal("0.1")`, а арифметика с `float` запрещена:
+
+```python
+from decimal import Decimal, FloatOperation, getcontext
+
+print(Decimal("0.1") == 0.1, Decimal("0.5") == 0.5)
+print(Decimal("0.1") < 0.1)
+
+try:
+    Decimal("0.1") + 0.1
+except TypeError as e:
+    print(e)
+
+getcontext().traps[FloatOperation] = True
+try:
+    Decimal(0.1)
+except FloatOperation as e:
+    print("FloatOperation", e)
+```
+
+```text title="Вывод"
+False True
+True
+unsupported operand type(s) for +: 'decimal.Decimal' and 'float'
+FloatOperation [<class 'decimal.FloatOperation'>]
+```
+
+`0.5` точно представимо в двоичной системе, поэтому сравнение с ним верно, а с `0.1` нет: `Decimal("0.1") < 0.1`. Сигнал `FloatOperation` по умолчанию не ловушка (только флаг в контексте). Если включить его в `traps`, любое неявное смешивание `Decimal` и `float` (конструктор от `float`, `==`, `<`) бросает исключение. Это хороший способ найти `float` в деньгах в тестах.
+
+## Хранение и распределение суммы
+
+`float` в JSON не годится потому, что большинство парсеров (JavaScript, `json.loads`) читают число как двоичный `float`: `19.99 * 100` даёт `1998.9999999999998`, и `int(...)` отбросит копейку. Варианты, как отдавать деньги по сети:
+
+- **Целое в минимальных единицах + код валюты**: `{"amount": 1999, "currency_code": "USD"}`. Это схема `MoneyDTO`. Целые точны в `int` на сервере, в JavaScript до 2^53 и в любой БД. Минус: клиент должен знать, сколько знаков у валюты.
+- **Строка**: `{"amount": "19.99", "currency": "USD"}`. Точно, читаемо, но потребителю нужно явно разбирать строку в `Decimal`.
+- **Число** (`19.99`): допустимо, только если потребитель гарантированно читает его как десятичное. Во всех остальных случаях источник скрытых потерь.
+
+**Минимальная единица зависит от валюты.** У USD две цифры после запятой, у JPY нет копеек вообще, у KWD три (стандарт ISO 4217: «экспонента» валюты).
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+EXP = {"USD": 2, "JPY": 0, "KWD": 3}
+
+def to_minor(amount: str, cur: str) -> int:
+    q = Decimal(1).scaleb(-EXP[cur])
+    return int(Decimal(amount).quantize(q, ROUND_HALF_UP).scaleb(EXP[cur]))
+
+print([to_minor(a, c) for a, c in (("19.99", "USD"), ("500", "JPY"), ("1.234", "KWD"))])
+```
+
+```text title="Вывод"
+[1999, 500, 1234]
+```
+
+Целое `500` — это 500 иен, но 5 долларов. Зашитое «умножить на 100» работает только для двухзначных валют; таблицу экспонент берут из справочника валют, а не из головы.
+
+**Деление суммы на части без потери копейки.** Делить в `float` или `round(total / n)` нельзя: сумма частей не равна целому.
+
+```python
+def split(total: int, parts: int) -> list[int]:
+    base, rem = divmod(total, parts)
+    return [base + 1 if i < rem else base for i in range(parts)]
+
+print(round(10000 / 3) * 3, split(10000, 3))
+```
+
+```text title="Вывод"
+9999 [3334, 3333, 3333]
+```
+
+`round(total / n)` теряет копейку. Остаток от деления (`divmod`) раздают по одной минимальной единице первым частям. С весами (доли, комиссии партнёрам) работает метод наибольших остатков: каждой части `total * w // sum(w)`, остаток раздают тем, у кого дробная часть доли больше. Инвариант для теста: `sum(parts) == total`.
+
+## Pydantic v2
+
+Поле `Decimal` в `model_dump_json` уходит **строкой**, а `model_dump()` оставляет `Decimal`:
+
+```python
+from decimal import Decimal
+from pydantic import BaseModel
+
+class A(BaseModel):
+    amount: Decimal
+
+print(A(amount=Decimal("1.95")).model_dump_json())
+print(A(amount=Decimal("1.95")).model_dump())
+print(A(amount=Decimal("1.950")).model_dump_json())
+print(A.model_json_schema()["properties"]["amount"])
+```
+
+```text title="Вывод"
+{"amount":"1.95"}
+{'amount': Decimal('1.95')}
+{"amount":"1.950"}
+{'anyOf': [{'type': 'number'}, {'type': 'string'}], 'title': 'Amount'}
+```
+
+Схема признаёт «число или строку» на входе; на выходе всегда строка с сохранением масштаба. Если контракт API (OpenAPI) обещает число, простая замена `float` на `Decimal` в модели ломает ответ для клиента. Чтобы отдавать числом в JSON, добавляют сериализатор:
+
+```python
+from decimal import Decimal
+from typing import Annotated
+from pydantic import BaseModel, PlainSerializer
+
+class B(BaseModel):
+    amount: Annotated[Decimal, PlainSerializer(float, return_type=float, when_used="json")]
+
+print(B(amount=Decimal("1.95")).model_dump_json())
+```
+
+```text title="Вывод"
+{"amount":1.95}
+```
+
+`when_used="json"` оставляет `Decimal` в `model_dump()` (нужно для расчётов и записи в БД), а в JSON превращает в число. `Annotated[..., PlainSerializer]` — переиспользуемый тип; то же на одну модель делает `@field_serializer("amount", when_used="json")`. Цена такого решения: в JSON уходит `float`, и точность `19.99` зависит от парсера клиента. Для настоящих денег лучше строка или целое в минимальных единицах, число оставляют, когда контракт уже зафиксирован.
+
+**Валидация знаков.** `Field(max_digits=..., decimal_places=...)` проверяет вход:
+
+```python
+from decimal import Decimal
+from pydantic import BaseModel, Field, ValidationError
+
+class D(BaseModel):
+    amount: Decimal = Field(max_digits=6, decimal_places=2)
+
+print(D(amount="1234.56"))
+for v in ("1.234", "12345.67"):
+    try:
+        print(D(amount=v))
+    except ValidationError as e:
+        print(v, e.errors()[0]["msg"])
+```
+
+```text title="Вывод"
+amount=Decimal('1234.56')
+1.234 Decimal input should have no more than 2 decimal places
+12345.67 Decimal input should have no more than 6 digits in total
+```
+
+`max_digits` считает все цифры, `decimal_places` — только дробные.
+
+**Float на входе.** Поле `Decimal` принимает `float` и строит значение из `str(float)`, а не из двоичного: `E(amount=0.1).amount` даёт `0.1`, но `0.1 + 0.2` сохраняет ошибку `0.30000000000000004`. Чтобы отвергать `float` совсем, включают `model_config = {"strict": True}`: в режиме Python принимается только `Decimal`, иначе `Input should be an instance of Decimal`.
+
+## PostgreSQL
+
+Деньги хранят в `numeric(precision, scale)`, например `numeric(12,2)`: точное десятичное, арифметика без ошибок двоичной дроби. `float8` (`double precision`) повторяет проблемы `float` Python. Тип `money` не используется: его формат и масштаб зависят от настройки `lc_monetary`, одна и та же база по-разному читается на разных серверах, а валюты в нём нет.
+
+`float8` в SQL повторяет `float`: `SELECT 0.1::float8 + 0.2::float8` даёт `0.30000000000000004`, а то же на `numeric` — `0.3`.
+
+`numeric(12,2)` округляет при записи и не принимает значения, которые не помещаются:
+
+```sql
+CREATE TABLE p(amount numeric(12,2));
+INSERT INTO p VALUES (2.675), (0.125), (2.5);
+SELECT amount FROM p;
+INSERT INTO p VALUES (1e10);
+```
+
+```text title="Вывод"
+ amount 
+--------
+   2.68
+   0.13
+   2.50
+
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 12, scale 2 must round to an absolute value less than 10^10.
+```
+
+`numeric` округляет половинки **от нуля** (`0.125` → `0.13`, как `ROUND_HALF_UP` для положительных), а `round(float8)` на этой платформе даёт банковское округление: `round(2.5::numeric)` → `3`, `round(2.5::float8)` → `2`. Режим округления поэтому тоже лучше выполнять в одном месте, в коде или в запросе, но не в обоих. Целые в минимальных единицах можно хранить в `bigint`: тогда валюту кладут отдельной колонкой (`currency_code`), а суммы со знаками разной валюты не складывают. Атомарность перевода между счетами и защита баланса от гонок — отдельная тема: [[Транзакции и уровни изоляции]].
+
+## Что спросят дальше
+
+- **Почему нельзя хранить деньги во `float`?** Двоичная дробь не представляет `0.1` точно, ошибка копится (`0.1 + 0.2 != 0.3`), `round(2.675, 2)` даёт `2.67`. Нужны `Decimal` из строки или целые минимальные единицы.
+- **Чем `Decimal(0.1)` отличается от `Decimal("0.1")`?** Первый берёт точное двоичное значение (`0.1000000000000000055...`), второй ровно `0.1`. Строить надо из строки или целого.
+- **Какое округление у `round()` и что делать для денег?** Банковское (`ROUND_HALF_EVEN`), как и у `quantize` по умолчанию. Для денег по бизнес-правилу обычно `quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`, один раз в конце расчёта.
+- **Что делает `prec`?** Число значащих цифр результата арифметики (28 по умолчанию), а не знаков после запятой; копейки задаёт `quantize`. Контекст в `ContextVar`, но объект `Context` изменяемый: `getcontext().prec = ...` может протечь между задачами, если контекст в главном потоке уже создан. Безопаснее `localcontext()` или `setcontext(Context(...))`.
+- **Как отдавать деньги в JSON?** Целым в минимальных единицах + код валюты либо строкой. У валют разное число знаков (JPY 0, KWD 3), поэтому «умножить на 100» неверно. Делить суммы нужно целочисленно: `divmod` и раздача остатка.
+- **Как pydantic v2 сериализует `Decimal` и какой тип взять в PostgreSQL?** В `model_dump_json` строкой (`"1.95"`); число даёт `PlainSerializer(float, when_used="json")`. В базе `numeric(12,2)` или `bigint` в минимальных единицах + валюта, не `float8` и не `money`.

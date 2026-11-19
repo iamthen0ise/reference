@@ -33,7 +33,10 @@ const sidebar = [
       { label: 'Сортировки', items: pages('Алгоритмы/Сортировки', ['Сортировки', 'Сортировки для эрудиции']) },
     ],
   },
-  { label: 'Python', items: pages('Python', ['Python', 'Python-протоколы', 'Python-классы', 'Python-конкурентность']) },
+  { label: 'Python', items: pages('Python', [
+    'Python', 'Python-протоколы', 'Python-классы', 'Python-конкурентность',
+    'Python-деньги и числа', 'Python-логи и тесты', 'Python-SQLAlchemy',
+  ]) },
   {
     label: 'Бэкенд',
     items: [
