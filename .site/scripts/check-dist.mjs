@@ -37,7 +37,8 @@ function visibleText(html) {
   return html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<(pre|code|script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<[^>]*>/g, ' ');
+    // tags with quoted attribute values: Expressive Code puts raw ">" in data-code="..."
+    .replace(/<\/?[a-z][^\s>\/]*(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, ' ');
 }
 
 function parsePage(html) {
@@ -138,7 +139,11 @@ export async function checkDist(distDir, { base, mermaid, asides }) {
     if (/language-mermaid|data-language\s*=\s*["']mermaid["']/.test(html)) {
       problems.push(`${where}: mermaid went to code highlighting (language-mermaid)`);
     }
-    mermaidCount += count(html, /<pre\b[^>]*\sclass\s*=\s*"(?:[^"]*\s)?mermaid(?:\s[^"]*)?"/gi);
+    if (/<pre\b[^>]*\sclass\s*=\s*"(?:[^"]*\s)?mermaid(?:\s[^"]*)?"/i.test(html)) {
+      problems.push(`${where}: unrendered mermaid source (pre.mermaid)`);
+    }
+    // starlight-obsidian renders diagrams at build time: <picture><source id="mermaid-dark-N" ...><img id="mermaid-N" ...>
+    mermaidCount += count(html, /<picture>\s*<source\b[^>]*\sid\s*=\s*"mermaid-dark-\d+"/gi);
     asideCount += count(html, /<aside\b[^>]*\sclass\s*=\s*"(?:[^"]*\s)?starlight-aside(?:\s[^"]*)?"/gi);
   }
 

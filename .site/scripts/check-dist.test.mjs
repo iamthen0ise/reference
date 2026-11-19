@@ -66,10 +66,35 @@ test('ignores code', async () => {
   assert.deepEqual(await checkDist(dir, OPTS), []);
 });
 
+test('ignores code in Expressive Code copy button (raw ">" inside data-code)', async () => {
+  const copy = '<div class="copy"><div aria-live="polite"></div><button title="Копировать" data-copied="Скопировано!" ' +
+    'data-code="self.buckets = [[] for _ in range(2)]\u007fdef f() -> int: return a > b">' +
+    '<div></div></button></div>';
+  const dir = await mutate('b/index.html', (h) => h.replace('</body>', copy + '</body>'));
+  assert.deepEqual(await checkDist(dir, OPTS), []);
+});
+
+test('raw wikilink in prose next to a quoted attribute with ">" still reported', async () => {
+  const dir = await mutate('b/index.html', (h) =>
+    h.replace('</body>', '<a title="a > b" href="/reference/">x</a><p>[[Note]]</p></body>'));
+  assert.match((await checkDist(dir, OPTS)).join('\n'), /\[\[/);
+});
+
 test('mermaid in code highlight reported', async () => {
   const dir = await mutate('b/index.html', (h) =>
     h.replace('</body>', '<pre data-language="mermaid"><code class="language-mermaid">x</code></pre></body>'));
   assert.match((await checkDist(dir, OPTS)).join('\n'), /mermaid/);
+});
+
+test('only rendered mermaid pictures are counted', async () => {
+  const dir = await mutate('b/index.html', (h) =>
+    h.replace('</body>', '<picture><source srcset="x.png"><img src="x.png" alt=""></picture></body>'));
+  assert.deepEqual(await checkDist(dir, OPTS), []);
+});
+
+test('unrendered mermaid source (pre.mermaid) reported', async () => {
+  const dir = await mutate('b/index.html', (h) => h.replace('</body>', '<pre class="mermaid">graph TD</pre></body>'));
+  assert.match((await checkDist(dir, OPTS)).join('\n'), /unrendered mermaid/);
 });
 
 test('mermaid and aside counts enforced', async () => {
