@@ -1,4 +1,6 @@
-.PHONY: init run build check test check-vault check-dist
+.PHONY: init run build check test check-vault check-dist check-browser
+
+PREVIEW_PORT ?= 4321
 
 init:
 	cd .site && npm ci && npx playwright install chromium
@@ -19,3 +21,7 @@ check-vault:
 
 check-dist:
 	node .site/scripts/check-dist.mjs .site/dist --base /reference --mermaid 32 --asides 30
+
+# Нужна готовая сборка (make build). Превью поднимается и гасится скриптом.
+check-browser:
+	cd .site && sh scripts/check-browser.sh $(PREVIEW_PORT)

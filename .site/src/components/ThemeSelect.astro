@@ -1,0 +1,65 @@
+---
+import StarlightThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+
+const palettes = [
+  { value: 'starlight', label: 'Starlight' },
+  { value: 'catppuccin', label: 'Catppuccin' },
+  { value: 'nord', label: 'Nord' },
+  { value: 'flexoki', label: 'Flexoki' },
+];
+
+// Starlight рисует ThemeSelect дважды (шапка и мобильное меню): id только у первого экземпляра.
+const locals = Astro.locals as Record<string, unknown>;
+const id = locals.paletteSelectRendered ? undefined : 'palette-select';
+locals.paletteSelectRendered = true;
+---
+
+<StarlightThemeSelect {...Astro.props}><slot /></StarlightThemeSelect>
+<select id={id} class="palette-select" aria-label="Палитра">
+  {palettes.map((p) => <option value={p.value}>{p.label}</option>)}
+</select>
+
+<style>
+  .palette-select {
+    margin-inline-start: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    background-color: var(--sl-color-bg-nav);
+    color: var(--sl-color-gray-1);
+    font: inherit;
+    font-size: var(--sl-text-sm);
+  }
+</style>
+
+<script>
+  const KEY = 'palette';
+  const IDS = ['starlight', 'catppuccin', 'nord', 'flexoki'];
+
+  const current = () => {
+    const v = document.documentElement.dataset.palette ?? 'starlight';
+    return IDS.includes(v) ? v : 'starlight';
+  };
+
+  function apply(value: string) {
+    const id = IDS.includes(value) ? value : 'starlight';
+    document.documentElement.dataset.palette = id;
+    try {
+      localStorage.setItem(KEY, id);
+    } catch {
+      // хранилище недоступно: палитра действует до перезагрузки
+    }
+    document.querySelectorAll<HTMLSelectElement>('select.palette-select').forEach((s) => (s.value = id));
+  }
+
+  function init() {
+    document.querySelectorAll<HTMLSelectElement>('select.palette-select').forEach((s) => {
+      s.value = current();
+      s.addEventListener('change', () => apply(s.value));
+    });
+  }
+
+  init();
+  // На клиентских переходах/повторной вставке синхронизируем select с атрибутом.
+  document.addEventListener('astro:after-swap', init);
+</script>

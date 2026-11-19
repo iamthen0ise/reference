@@ -6,6 +6,11 @@ import rehypeBaseLinks from './src/plugins/rehype-base-links.mjs';
 
 const base = '/reference';
 
+// До отрисовки: палитра из localStorage -> data-palette. Любой сбой хранилища (в т.ч. SecurityError при самом
+// обращении к localStorage) гасится; тогда подставляется безопасная заглушка, чтобы штатные скрипты Starlight
+// (ThemeProvider/ThemeSelect читают localStorage без try/catch) не падали.
+const paletteScript = `(function(){var d=document.documentElement,p='starlight';try{var v=localStorage.getItem('palette');if(v==='catppuccin'||v==='nord'||v==='flexoki')p=v}catch(e){try{Object.defineProperty(window,'localStorage',{configurable:true,value:{getItem:function(){return null},setItem:function(){},removeItem:function(){}}})}catch(e2){}}d.dataset.palette=p})()`;
+
 // Страницы генерирует starlight-obsidian в notes/ (slug = путь в нижнем регистре, пробелы -> дефисы).
 // Порядок меню задан явно: autogenerate сортировал бы по алфавиту, а служебных полей в заметки добавлять не хочется.
 const page = (...path) => ({ slug: ['notes', ...path].join('/').toLowerCase().replaceAll(' ', '-') });
@@ -84,7 +89,9 @@ export default defineConfig({
       title: 'Reference',
       locales: { root: { label: 'Русский', lang: 'ru' } },
       favicon: '/favicon.svg',
-      customCss: ['./src/styles/base.css'],
+      customCss: ['./src/styles/base.css', './src/styles/palettes.css', './src/styles/mobile.css'],
+      components: { ThemeSelect: './src/components/ThemeSelect.astro' },
+      head: [{ tag: 'script', content: paletteScript }],
       plugins: [
         starlightObsidian({
           vault: '..',
