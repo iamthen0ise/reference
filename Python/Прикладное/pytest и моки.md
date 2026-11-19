@@ -1,192 +1,12 @@
 ---
-title: "Python: логирование и тесты"
+title: "Python: pytest и моки"
 ---
 
-Конспект к собеседованию по логированию и тестам в Python: как устроена иерархия логгеров и почему не печатается `DEBUG`, чем опасны неверные аргументы лога и `extra`, как собрать JSON-формат; фикстуры pytest, `parametrize`, `monkeypatch`; что и где патчить в `unittest.mock`, как `caplog` пропускает записи и почему тест может проходить на пустоте.
-Рядом: [[Python-протоколы]] (контекстные менеджеры и декораторы — на них держатся `patch` и фикстуры) · [[Python-конкурентность]] (`AsyncMock` и корутины).
-Разделы: [[#logging: иерархия и уровни]] · [[#logging: сообщения, исключения, extra]] · [[#JSON-форматтер]] · [[#pytest: фикстуры и параметризация]] · [[#Что и где патчить]] · [[#caplog и логгеры мимо него]] · [[#Тест, который ничего не ловит]] · [[#Что спросят дальше]]
+Конспект к собеседованию по тестам в Python: фикстуры pytest, `parametrize`, `monkeypatch`; что и где патчить в `unittest.mock`, как `caplog` пропускает записи и почему тест может проходить на пустоте.
+Рядом: [[Логирование]] (иерархия логгеров, на которой держится `caplog`) · [[Декораторы]] и [[Контекстные менеджеры]] (на них держатся `patch` и фикстуры) · [[asyncio на практике]] (`AsyncMock` и корутины).
+Разделы: [[#pytest: фикстуры и параметризация]] · [[#Что и где патчить]] · [[#caplog и логгеры мимо него]] · [[#Тест, который ничего не ловит]] · [[#Что спросят дальше]]
 
-**Суть.** Логгер — узел дерева имён: запись создаёт логгер, а печатает хендлер, и до хендлера её ведут два порога (уровень логгера, затем уровень хендлера) и флаг `propagate`. Тест проверяет только то, что мы сумели увидеть: если запись ушла мимо перехватчика, а мок подменил не то имя, тест зелёный и бесполезный. Поэтому после написания теста его ломают: убирают проверяемое поведение и смотрят, что тест упал.
-
-## logging: иерархия и уровни
-
-Имя `app.db` — потомок `app`, тот — потомок корневого логгера `root`. Запись, прошедшая порог логгера, **всплывает** вверх: её обрабатывают хендлеры самого логгера и всех предков (порог уровня предка при этом не проверяется, только уровень их хендлеров). `propagate = False` обрывает подъём.
-
-```python
-import logging
-logging.basicConfig(format="%(name)s %(levelname)s %(message)s", level=logging.INFO)
-
-child = logging.getLogger("app.db")
-print(child.parent.name, child.getEffectiveLevel(), child.level)
-child.info("hello from child")
-
-quiet = logging.getLogger("app.quiet")
-quiet.propagate = False          # до хендлера root запись не дойдёт
-quiet.info("lost")
-print("quiet done")
-```
-
-```text title="Вывод"
-root 20 0
-app.db INFO hello from child
-quiet done
-```
-
-`child.level == 0` (NOTSET) — свой уровень не задан, действует уровень ближайшего предка с заданным (`getEffectiveLevel()` = 20 = INFO). Запись `lost` пропала молча: у `app.quiet` нет хендлеров, а наверх её не пустили.
-
-### Почему DEBUG не печатается
-
-Порогов два: `Logger.setLevel` решает, создавать ли запись, `Handler.setLevel` — печатать ли её. Печатается только то, что прошло оба. Частая причина «ничего нет»: уровень выставили не там или у хендлера он выше.
-
-```python
-import logging
-log = logging.getLogger("demo")
-log.setLevel(logging.DEBUG)          # логгер пропускает всё
-h = logging.StreamHandler()
-h.setLevel(logging.WARNING)          # а хендлер печатает только WARNING и выше
-log.addHandler(h)
-log.debug("debug")
-log.warning("warn")
-```
-
-```text title="Вывод"
-warn
-```
-
-`debug` отсёк хендлер. Если хендлеров нет нигде, действует `logging.lastResort`, печатающий только WARNING и выше в stderr. Лечение — `logging.basicConfig(level=...)` один раз при старте приложения (не в библиотеках) или явные хендлеры. Библиотека добавляет только `NullHandler` и ничего не настраивает.
-
-## logging: сообщения, исключения, extra
-
-### Ленивое форматирование
-
-`log.info("x=%s", x)` передаёт шаблон и аргументы отдельно: строка собирается, только если запись прошла порог. f-строка формирует сообщение заранее, даже если уровень выключен, и вызывает `__str__` каждого аргумента.
-
-```python
-import logging
-logging.basicConfig(format="%(levelname)s %(message)s", level=logging.INFO)
-log = logging.getLogger("x")
-
-class Costly:
-    def __str__(self):
-        print("  __str__ called")
-        return "costly"
-
-log.debug("a %s", Costly())         # DEBUG выключен: __str__ не вызван
-print("f-string:")
-log.debug(f"a {Costly()}")          # то же, но строка собрана впустую
-```
-
-```text title="Вывод"
-f-string:
-  __str__ called
-```
-
-Для дешёвых значений разницы почти нет; важнее вторая причина: сообщение с неизменным шаблоном (`"order %s paid"`) группируется в Sentry и ищется в логах по шаблону, а f-строка даёт новое сообщение на каждый id. Ruff ловит f-строки в логах правилом `G004`.
-
-### log.exception и exc_info
-
-`log.exception(...)` — это `log.error(..., exc_info=True)`: пишет сообщение и трейсбек текущего исключения. Вызывать только внутри `except`, иначе в хвосте будет `NoneType: None`. Без `exc_info` трейсбек теряется — в логе останется одно сообщение без причины.
-
-```python
-try:
-    1 / 0
-except ZeroDivisionError:
-    log.exception("failed")          # сообщение + трейсбек
-```
-
-```text title="Вывод"
-ERROR failed
-Traceback (most recent call last):
-  ...
-ZeroDivisionError: division by zero
-```
-
-Без `exc_info` (`log.error("failed")`) остаётся одна строка без причины.
-
-Логируют исключение один раз, там, где его обработали; `log.exception` в каждом слое при `raise` даёт десяток копий одного трейсбека.
-
-Клиенту не отдают `str(exc)`: в тексте исключения бывают SQL, пути, адреса внутренних сервисов, токены. Наружу — общий код и `request_id`, детали остаются в логе по тому же `request_id`.
-
-### extra и зарезервированные поля
-
-`extra={...}` добавляет атрибуты прямо в `LogRecord` — формат `%(user)s` и JSON-форматтер их видят. Но имена не должны совпадать с полями записи (`name`, `args`, `message`, `msg`, `levelname`, `module`, `exc_info`, ...), иначе `KeyError` — в самом месте вызова `log.info`:
-
-```python
-import logging
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("x")
-for extra in ({"user": "u1"}, {"message": "m"}, {"args": (1,)}, {"name": "n"}):
-    try:
-        log.info("ok", extra=extra)
-        print("ok", extra)
-    except Exception as e:
-        print(type(e).__name__, e)
-```
-
-```text title="Вывод"
-INFO:x:ok
-ok {'user': 'u1'}
-KeyError "Attempt to overwrite 'message' in LogRecord"
-KeyError "Attempt to overwrite 'args' in LogRecord"
-KeyError "Attempt to overwrite 'name' in LogRecord"
-```
-
-Логирование не должно ронять бизнес-код: в проектных обёртках имена полей префиксуют (`ctx_args`).
-
-### Число %s не совпало с аргументами
-
-Ошибка форматирования внутри `logging` не поднимается к вызывающему: хендлер перехватывает её, печатает в stderr блок `--- Logging error ---` и идёт дальше. Сообщение при этом **теряется**, программа продолжает работать:
-
-```python
-log.info("two %s %s", 1)     # не хватает аргумента
-print("after")
-```
-
-```text title="Вывод"
---- Logging error ---
-Traceback (most recent call last):
-  ...
-TypeError: not enough arguments for format string (got 1)
-Message: 'two %s %s'
-Arguments: (1,)
-after
-```
-
-Лишний аргумент (`log.info("none", 1)`) даёт то же самое с `TypeError: not all arguments converted`. Подводные камни: этот блок видят только те, кто смотрит stderr; в централизованных логах и Sentry записи просто нет. Отключается всё это `logging.raiseExceptions = False` — в проде так иногда и стоит, и тогда сбой форматирования не виден совсем. Ловить такое надо линтером (`PLE1205`/`PLE1206` — несовпадение числа аргументов) и тестами, где проверяется `caplog.text`.
-
-## JSON-форматтер
-
-Структурные логи (`json` на строку) читаются Loki/ELK без регулярок. Нужно взять стандартные поля, добавить всё из `extra` (всё, чего нет в наборе штатных атрибутов) и последнюю строку исключения.
-
-```python
-import json, logging
-
-STD = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
-
-class JsonFormatter(logging.Formatter):
-    def format(self, record):
-        data = {"ts": self.formatTime(record, "%H:%M:%S"), "level": record.levelname,
-                "logger": record.name, "msg": record.getMessage()}
-        data.update({k: v for k, v in record.__dict__.items() if k not in STD})
-        if record.exc_info:
-            data["exc"] = self.formatException(record.exc_info).splitlines()[-1]
-        return json.dumps(data, ensure_ascii=False, default=str)
-
-h = logging.StreamHandler(); h.setFormatter(JsonFormatter())
-log = logging.getLogger("app"); log.addHandler(h); log.setLevel(logging.INFO)
-log.info("order %s paid", 42, extra={"order_id": 42, "amount": "9.99"})
-try:
-    {}["k"]
-except KeyError:
-    log.exception("boom")
-```
-
-```text title="Вывод"
-{"ts": "...", "level": "INFO", "logger": "app", "msg": "order 42 paid", "order_id": 42, "amount": "9.99"}
-{"ts": "...", "level": "ERROR", "logger": "app", "msg": "boom", "exc": "KeyError: 'k'"}
-```
-
-`default=str` защищает от `Decimal`, `datetime`, `UUID` в `extra`: без него `json.dumps` упал бы, и запись ушла бы в «Logging error». Секреты и персональные данные маскируют до логирования: форматтер не знает, что в `extra` лежит токен.
+**Суть.** Тест проверяет только то, что мы сумели увидеть: если запись ушла мимо перехватчика, а мок подменил не то имя, тест зелёный и бесполезный. Поэтому после написания теста его ломают: убирают проверяемое поведение и смотрят, что тест упал.
 
 ## pytest: фикстуры и параметризация
 
@@ -340,7 +160,7 @@ autospec: too many positional arguments
 7 1
 ```
 
-`AsyncMock` — мок корутинной функции: вызов возвращает корутину, `await` даёт `return_value`, а `await_count` и `assert_awaited_once_with` проверяют именно ожидание (вызвать, но не `await` — тоже баг). `patch` сам выбирает `AsyncMock`, если цель — `async def`. `await MagicMock()()` даёт `TypeError: 'MagicMock' object can't be awaited`. Про корутины и цикл событий — [[Python-конкурентность]].
+`AsyncMock` — мок корутинной функции: вызов возвращает корутину, `await` даёт `return_value`, а `await_count` и `assert_awaited_once_with` проверяют именно ожидание (вызвать, но не `await` — тоже баг). `patch` сам выбирает `AsyncMock`, если цель — `async def`. `await MagicMock()()` даёт `TypeError: 'MagicMock' object can't be awaited`. Про корутины и цикл событий — [[asyncio на практике]].
 
 ## caplog и логгеры мимо него
 
@@ -445,9 +265,6 @@ FAILED test_r.py::test_two_objects - assert 10 == 20
 
 ## Что спросят дальше
 
-- Что произойдёт с записью `logger.info()`, если у логгера уровень DEBUG, а у единственного хендлера WARNING? А если хендлеров нет вовсе?
-- Чем `propagate = False` отличается от `logger.disabled = True` и где его применяют?
-- Почему `log.info("id=%s", x)` предпочтительнее f-строки, и когда разница несущественна? Что произойдёт при неверном числе аргументов?
 - Как работает область видимости фикстур и какой scope выбрать для подключения к базе, для HTTP-клиента, для временных файлов? Что произойдёт с teardown, если упал setup?
 - Что именно подменяет `patch("pkg.mod.asyncio.sleep")` и как сделать это безопасно? Где патчить при `from x import y` и при `import x`?
 - Как убедиться, что тест на «в логах нет ошибки» не проходит на пустоте? Как проверить, что тест вообще способен упасть?
