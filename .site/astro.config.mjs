@@ -90,6 +90,8 @@ export default defineConfig({
           vault: '..',
           // Заглушка вместо .obsidian/, которого нет в репозитории (и в CI).
           configFolder: '.site/vault-config',
+          // Заголовок из frontmatter (title: Reference у главной), а не имя файла.
+          copyFrontmatter: 'starlight',
           ignore: ['.*/**', 'docs/**', 'README.md', 'node_modules/**'],
         }),
       ],
