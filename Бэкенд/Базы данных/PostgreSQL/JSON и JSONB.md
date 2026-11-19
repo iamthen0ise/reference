@@ -50,6 +50,119 @@ ALTER TABLE products ADD COLUMN brand text GENERATED ALWAYS AS (attrs ->> 'brand
 > [!warning] Ловушка
 > GIN-индекс по `attrs` **не** ускорит запрос `attrs ->> 'brand' = 'Apple'`. Нужно либо переписать условие как `@> '{"brand":"Apple"}'`, либо построить индекс по выражению.
 
+## Техника: что возвращают операторы, GIN-индекс и ловушки
+
+Данные для примеров: `products` на 200 тыс. строк, в `attrs` лежат `brand`, `color`, `ram` и вложенный `screen`; ключ `warranty` есть у каждой тысячной строки (200 штук).
+
+```sql
+SELECT id, attrs FROM products WHERE id IN (1, 1000) ORDER BY id;
+```
+
+| id | attrs |
+| --- | --- |
+| 1 | {"ram": 8, "brand": "Samsung", "color": "white", "screen": {"size": 5.6}} |
+| 1000 | {"ram": 4, "brand": "Apple", "color": "black", "screen": {"size": 5.5}, "warranty": 36} |
+
+Порядок ключей в jsonb не тот, в каком их записали: он хранит их по длине и алфавиту. Теперь операторы доступа на строке `id = 1`: `->` возвращает `jsonb`, `->>` возвращает `text`, `#>>` идёт по пути и тоже возвращает `text`:
+
+```sql
+SELECT attrs -> 'screen' AS j, attrs -> 'screen' ->> 'size' AS t, attrs #>> '{screen,size}' AS path,
+       attrs -> 'brand' AS brand_j, attrs ->> 'brand' AS brand_t
+FROM products WHERE id = 1;
+```
+
+| j | t | path | brand_j | brand_t |
+| --- | --- | --- | --- | --- |
+| {"size": 5.6} | 5.6 | 5.6 | "Samsung" | Samsung |
+
+Обратите внимание на кавычки: `brand_j` — это jsonb-строка `"Samsung"` вместе с кавычками, `brand_t` — обычный текст. Отсюда первая ловушка, сравнение через `->`:
+
+```sql
+SELECT count(*) FROM products WHERE attrs -> 'brand' = 'Apple';
+```
+
+```text title="Вывод"
+ERROR:  invalid input syntax for type json
+DETAIL:  Token "Apple" is invalid.
+```
+
+Справа от `=` должен стоять jsonb, и литерал `'Apple'` Postgres разбирает как JSON, а `Apple` без кавычек — не JSON. Правильно либо `attrs -> 'brand' = '"Apple"'` (jsonb-строка), либо `attrs ->> 'brand' = 'Apple'` (текст); оба дают 40000. Вторая ловушка — сравнение чисел через `->>`:
+
+```sql
+SELECT count(*) FILTER (WHERE attrs ->> 'ram' > '16')         AS as_text,
+       count(*) FILTER (WHERE (attrs ->> 'ram')::int > 16)    AS as_int,
+       count(*) FILTER (WHERE attrs -> 'ram' > '16')          AS as_jsonb
+FROM products;
+```
+
+| as_text | as_int | as_jsonb |
+| --- | --- | --- |
+| 150000 | 50000 | 50000 |
+
+`->>` возвращает текст, а строки сравниваются посимвольно: `'4' > '16'` и `'8' > '16'` истинны (по первому символу), поэтому оперативная память в 4 и 8 ГБ «больше» 16. Ошибки нет, просто неверный ответ. Нужно приводить к числу (`::int`) или сравнивать `->` с jsonb-числом (`'16'` справа разбирается как JSON-число).
+
+Containment и проверка ключа, и как меняется документ (исходный документ строки `id = 1`: `{"ram": 8, "brand": "Samsung", "color": "white", ...}`):
+
+```sql
+SELECT count(*) FROM products WHERE attrs @> '{"color": "black", "brand": "Apple"}';   -- 10000
+SELECT count(*) FROM products WHERE attrs ? 'warranty';                                -- 200
+
+SELECT jsonb_set(attrs, '{color}', '"black"') AS jsonb_set_result,
+       attrs || '{"promo": true}'              AS merged,
+       attrs - 'color'                         AS removed
+FROM products WHERE id = 1;
+```
+
+| jsonb_set_result | merged | removed |
+| --- | --- | --- |
+| {"ram": 8, "brand": "Samsung", "color": "black", "screen": {"size": 5.6}} | {"ram": 8, "brand": "Samsung", "color": "white", "promo": true, "screen": {"size": 5.6}} | {"ram": 8, "brand": "Samsung", "screen": {"size": 5.6}} |
+
+Все три выражения возвращают новый документ; `UPDATE` нужен, чтобы записать его в строку. Теперь GIN-индекс. Редкий ключ без индекса — Seq Scan по всей таблице:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM products WHERE attrs @> '{"warranty": 36}';
+```
+
+```text title="Вывод"
+Seq Scan on products  (cost=0.00..6275.00 rows=200 width=120) (actual time=0.057..14.157 rows=200 loops=1)
+  Filter: (attrs @> '{"warranty": 36}'::jsonb)
+  Rows Removed by Filter: 199800
+  Buffers: shared hit=3775
+Execution Time: 14.171 ms
+```
+
+```sql
+CREATE INDEX idx_products_attrs ON products USING gin (attrs);
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM products WHERE attrs @> '{"warranty": 36}';
+```
+
+```text title="Вывод"
+Bitmap Heap Scan on products  (cost=92.36..741.90 rows=200 width=120) (actual time=0.022..0.074 rows=200 loops=1)
+  Recheck Cond: (attrs @> '{"warranty": 36}'::jsonb)
+  Heap Blocks: exact=200
+  Buffers: shared hit=203
+  ->  Bitmap Index Scan on idx_products_attrs  (cost=0.00..92.31 rows=200 width=0) (actual time=0.013..0.013 rows=200 loops=1)
+        Index Cond: (attrs @> '{"warranty": 36}'::jsonb)
+        Buffers: shared hit=3
+Execution Time: 0.080 ms
+```
+
+С индексом: 203 страницы вместо 3775, 0,08 мс вместо 14 мс. Размер индекса 2,3 МБ при таблице в 29 МБ. И ловушка из предупреждения выше, в плане: тот же поиск через `->>` индекс игнорирует.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM products WHERE attrs ->> 'warranty' = '36';
+```
+
+```text title="Вывод"
+Seq Scan on products  (cost=0.00..6775.00 rows=1000 width=120) (actual time=0.034..6.394 rows=200 loops=1)
+  Filter: ((attrs ->> 'warranty'::text) = '36'::text)
+  Rows Removed by Filter: 199800
+  Buffers: shared hit=3775
+Execution Time: 6.402 ms
+```
+
+Обратите внимание на оценки: `rows=1000` против фактических 200. У планировщика нет статистики по ключам внутри документа, поэтому для `->> ... = ...` он берёт долю по умолчанию (0,5% таблицы), а для `@>` другую (0,1%, то есть 200 строк, что здесь совпало с фактом случайно). На реальных данных оценка по jsonb-ключам часто промахивается, и это ещё одна причина выносить важные поля в колонки.
+
 ## Когда jsonb — да, а когда нет
 
 jsonb удобен, но легко превращается в способ не проектировать схему. Слева — случаи, где он на своём месте, справа — где лучше обычные колонки.
