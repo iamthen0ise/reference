@@ -14,7 +14,7 @@ const paletteScript = `(function(){var d=document.documentElement,p='starlight';
 
 // Страницы генерирует starlight-obsidian в notes/ (slug = путь в нижнем регистре, пробелы -> дефисы).
 // Порядок меню задан явно: autogenerate сортировал бы по алфавиту, а служебных полей в заметки добавлять не хочется.
-const page = (...path) => ({ slug: ['notes', ...path].join('/').toLowerCase().replaceAll(' ', '-') });
+const page = (...path) => ({ slug: ['notes', ...path].join('/').toLowerCase().replaceAll(' ', '-').replaceAll(',', '') });
 const pages = (dir, names) => names.map((name) => page(dir, name));
 const sidebar = [
   { label: 'Оглавление', slug: 'notes' },
@@ -65,7 +65,7 @@ const sidebar = [
       },
       {
         label: 'Рецепты',
-        items: pages('Python/Рецепты', ['Выбор примитива синхронизации', 'Починка декораторов', 'Декоратор замера', 'Потерянные исключения в async', 'Скачать много ссылок']),
+        items: pages('Python/Рецепты', ['Выбор примитива синхронизации', 'Починка декораторов', 'Декоратор замера', 'Потерянные исключения в async', 'Скачать много ссылок', 'Список, генератор или async-генератор']),
       },
     ],
   },
