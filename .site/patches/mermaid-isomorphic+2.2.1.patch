@@ -1,0 +1,28 @@
+diff --git a/node_modules/mermaid-isomorphic/dist/mermaid-isomorphic.js b/node_modules/mermaid-isomorphic/dist/mermaid-isomorphic.js
+index c83ed43..fb4b735 100644
+--- a/node_modules/mermaid-isomorphic/dist/mermaid-isomorphic.js
++++ b/node_modules/mermaid-isomorphic/dist/mermaid-isomorphic.js
+@@ -90,8 +90,15 @@ export function createMermaidRenderer(options = {}) {
+     const { browser = chromium, launchOptions } = options;
+     let browserPromise;
+     let count = 0;
++    // Не больше MAX_PAGES вкладок разом: десятки параллельных вкладок роняют общий Chromium
++    const MAX_PAGES = Number(process.env.MERMAID_MAX_PAGES) || 4;
++    let active = 0;
++    const waiting = [];
++    const acquire = () => active < MAX_PAGES ? (active += 1, Promise.resolve()) : new Promise((resolve) => waiting.push(resolve));
++    const release = () => { const next = waiting.shift(); if (next) next(); else active -= 1; };
+     return async (diagrams, renderOptions) => {
+         count += 1;
++        await acquire();
+         if (!browserPromise) {
+             browserPromise = browser?.launch(launchOptions);
+         }
+@@ -133,6 +140,7 @@ export function createMermaidRenderer(options = {}) {
+         }
+         finally {
+             await page?.close();
++            release();
+             count -= 1;
+             if (!count) {
+                 browserPromise = undefined;
