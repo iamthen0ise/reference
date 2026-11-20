@@ -4,7 +4,7 @@ title: "Python: ошибки и отмена в asyncio"
 
 Таймаут как отмена, проглоченная `CancelledError` и `ExceptionGroup` во вложенных группах: где отмена и ошибки теряются.
 Рядом: [[asyncio на практике]] · [[Таймауты и нагрузка в asyncio]] · [[asyncio под капотом]]
-Разделы: asyncio.timeout · [[#Отмена: проглоченная и проброшенная]] · ExceptionGroup во вложенных TaskGroup · [[#Что спросят дальше]]
+Разделы: asyncio.timeout · [[#Как timeout превращает отмену в TimeoutError]] · [[#Отмена: проглоченная и проброшенная]] · [[#Как устроена отмена: записка на столе]] · [[#Ловушки]] · ExceptionGroup во вложенных TaskGroup · [[#Падение одной задачи отменяет соседей]] · [[#Что спросят дальше]]
 
 ## `asyncio.timeout`
 
@@ -29,7 +29,60 @@ TimeoutError()
 
 Внутри блока задача отменена (`CancelledError` на `await`), а снаружи `async with` превратил отмену в обычный `TimeoutError`.
 
-Ловушки:
+### Как timeout превращает отмену в TimeoutError
+
+`timeout` не прерывает код сам. Он ставит таймер, и по истечении таймера просто вызывает `task.cancel()` у текущей задачи. Дальше всё делает обычная отмена, а на выходе из блока `async with` смотрит: пришла `CancelledError`? Тогда подменяет её на `TimeoutError`. Но только если отмену вызвал собственный таймер: `__aexit__` сверяет `uncancel()` со счётчиком `cancelling()`, и внешняя отмена так и выходит `CancelledError`.
+
+```mermaid
+flowchart TD
+    A["вход в async with<br/>ставит таймер"] --> B["await внутри блока"]
+    B -->|"успел до дедлайна"| C["выход без ошибки"]
+    B -->|"дедлайн"| D["таймер зовёт<br/>task.cancel()"]
+    D --> E["CancelledError<br/>на await"]
+    E -->|"дошла до выхода"| F["__aexit__ подменяет<br/>на TimeoutError"]
+    E -->|"проглочена внутри"| G["выход без ошибки,<br/>таймаут потерян"]
+```
+
+Ветка «проглочена внутри» — ловушка. Проверка на Python 3.15:
+
+```python
+import asyncio
+
+
+async def main():
+    # отмену проглотили внутри блока
+    async with asyncio.timeout(0.1):
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            print("проглотили отмену")
+    print("блок timeout завершился без TimeoutError")
+
+    # то же, но с повторным raise
+    try:
+        async with asyncio.timeout(0.1):
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                print("пробросили отмену")
+                raise
+    except TimeoutError:
+        print("снаружи TimeoutError")
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+проглотили отмену
+блок timeout завершился без TimeoutError
+пробросили отмену
+снаружи TimeoutError
+```
+
+Проглоченная отмена прячет таймаут: код после блока идёт дальше так, будто дедлайна не было.
+
+### Ловушки
 
 - **Забытый `await`.** `fetch(1)` без `await` создаёт корутину и ничего не делает; Python предупредит `RuntimeWarning: coroutine ... was never awaited`, но только когда объект корутины удаляется: сразу, если ссылки на неё нет (как ниже), и позже, если она где-то лежит. Пример в подразделе «Забытый `await`».
 - **Задача «запустил и забыл».** Цикл событий хранит на задачи только слабые ссылки: `asyncio.create_task(send_email())` без сохранения результата может быть собрана сборщиком мусора посреди работы. Держите ссылки (множество задач с `add_done_callback(tasks.discard)`) или используйте `TaskGroup`.
@@ -80,7 +133,62 @@ main: await t бросил CancelledError
 t.cancelled() = True
 ```
 
-Если `CancelledError` проглочена, задача считает себя живой и завершается как обычная: `cancelled()` равно `False`, `await t` ничего не бросает. Для `TaskGroup` и `asyncio.timeout` это тяжело: они рассчитывают, что отмена дойдёт до границы блока.
+Если `CancelledError` проглочена, задача считает себя живой и завершается как обычная: `cancelled()` равно `False`, `await t` ничего не бросает. Для `TaskGroup` и `asyncio.timeout` это ломает их логику: они рассчитывают, что отмена дойдёт до границы блока.
+
+## Как устроена отмена: записка на столе
+
+Аналогия: `task.cancel()` — записка «прервись» на столе коллеги. Коллега не бросает работу на полуслове: он увидит записку, когда в следующий раз поднимет голову, то есть дойдёт до `await`. Выбросить записку (проглотить `CancelledError`) он тоже может, и тогда считает, что ничего не просили.
+
+```mermaid
+sequenceDiagram
+    participant M as main
+    participant L as Цикл
+    participant T as Задача
+    M->>T: t.cancel()
+    Note over T: только флаг,<br/>cancelling = 1
+    M->>L: любой await<br/>отдаёт управление
+    L->>T: CancelledError<br/>на ближайшем await
+    Note over T: finally,<br/>очистка
+    T-->>L: пробросила
+    L-->>M: cancelled() = True
+```
+
+`cancel()` ничего не прерывает сразу: он ставит запрос, а исключение прилетает в задачу на её ближайшем `await`, когда `main` отдаст управление циклу (любым `await`, не обязательно `await t`).
+
+```python
+import asyncio
+
+
+async def worker():
+    try:
+        await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        print("  worker: CancelledError на await")
+        raise
+
+
+async def main():
+    t = asyncio.create_task(worker())
+    await asyncio.sleep(0)  # дали задаче дойти до sleep
+    t.cancel()
+    print("после cancel():", "cancelled =", t.cancelled(), "done =", t.done(), "cancelling =", t.cancelling())
+    try:
+        await t
+    except asyncio.CancelledError:
+        pass
+    print("после await t: ", "cancelled =", t.cancelled(), "done =", t.done())
+
+
+asyncio.run(main())
+```
+
+```text title="Вывод"
+после cancel(): cancelled = False done = False cancelling = 1
+  worker: CancelledError на await
+после await t:  cancelled = True done = True
+```
+
+Сразу после `cancel()` задача ещё не отменена (`cancelled()` равно `False`), только запрос принят (`cancelling()` равно 1). Статус «отменена» появляется, когда `CancelledError` дошла до конца корутины.
 
 ## `ExceptionGroup` во вложенных `TaskGroup`
 
@@ -188,6 +296,10 @@ loop handler: CancelledError()
 ```
 
 Первый колбэк упал на `result()` и попал в обработчик исключений цикла (без своего обработчика это просто строка в логе), второй проверяет `cancelled()` и `exception()` перед `result()`.
+
+### Падение одной задачи отменяет соседей
+
+`TaskGroup` ведёт себя как бригада: упал один, остальным говорят «стоп». Пример и схема — в разделе «`gather` и `TaskGroup`: что с остальными задачами, когда одна упала» заметки [[asyncio на практике]]. Здесь важно одно: соседи должны честно пробрасывать `CancelledError`.
 
 ## Что спросят дальше
 
