@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Прогон SQL на PostgreSQL 17 в Docker: up | run | block | down.
+# Прогон SQL на PostgreSQL 17 в Docker: up | run | block | bg | down.
 # Схема и данные берутся из страницы «Схема библиотеки».
 set -euo pipefail
 
@@ -10,7 +10,7 @@ image="${SQL_PG_IMAGE:-postgres:17-alpine}"
 schema_page="${SQL_PG_PAGE:-$root/Бэкенд/Базы данных/SQL-рецепты/Схема библиотеки.md}"
 
 usage() {
-  echo "usage: sql-pg.sh up [small|big] | run FILE | block PAGE TITLE | down" >&2
+  echo "usage: sql-pg.sh up [small|big] | run FILE | block PAGE TITLE | bg PAGE TITLE | down" >&2
   exit 2
 }
 
@@ -30,6 +30,29 @@ extract_block() {
     on && $0 == "```" { exit }
     on { print }
   ' "$page"
+}
+
+# Блок в фоновой сессии: application_name = имя блока без .sql. Возвращается, когда сессия
+# видна в pg_stat_activity (до 10 с, иначе код 1). Срок жизни сессии ограничивает сам блок.
+cmd_bg() {
+  local page="$1" title="$2" name body file i seen
+  body="$(extract_block "$page" "$title")" || return 1
+  name="${title%.sql}"
+  case "$name" in
+    ""|*[!A-Za-z0-9_-]*) echo "bad block name for bg: $title" >&2; return 1 ;;
+  esac
+  file="/tmp/bg-$name-$$-$RANDOM.sql"
+  printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' sh "$file"
+  docker exec -d -e PGAPPNAME="$name" "$container" \
+    psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$file"
+  for i in $(seq 1 20); do
+    seen="$(docker exec "$container" psql -X -q -t -A -U postgres -d library \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$name'")"
+    if [ "$seen" -gt 0 ]; then return 0; fi
+    sleep 0.5
+  done
+  echo "bg session not visible in 10s: $name" >&2
+  return 1
 }
 
 cmd_down() {
@@ -63,6 +86,7 @@ case "${1:-}" in
   up) cmd_up "${2:-small}" ;;
   run) [ $# -eq 2 ] || usage; psql_run < "$2" ;;
   block) [ $# -eq 3 ] || usage; body="$(extract_block "$2" "$3")"; printf '%s\n' "$body" | psql_run ;;
+  bg) [ $# -eq 3 ] || usage; cmd_bg "$2" "$3" ;;
   down) cmd_down ;;
   *) usage ;;
 esac

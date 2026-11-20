@@ -42,6 +42,10 @@ ${fence}
 ${fence}sql title="err.sql"
 SELECT * FROM nope;
 ${fence}
+
+${fence}sql title="bg-sleep.sql"
+SELECT pg_sleep(5);
+${fence}
 MD
 
 # 1. нет блока
@@ -68,7 +72,18 @@ printf '%s\n' "SELECT count(*) AS n FROM t;" "SELECT extname FROM pg_extension W
 out="$(bash "$script" run "$tmp/check.sql" 2>&1)"
 if [[ "$out" == *" 1"* ]] && [[ "$out" == *"pg_stat_statements"* ]]; then ok "seed и расширение"; else bad "seed и расширение ($out)"; fi
 
-# 6. down идемпотентен
+# 6. bg: фоновая сессия видна в pg_stat_activity под именем блока
+bash "$script" bg "$tmp/page.md" bg-sleep.sql >"$tmp/bg.out" 2>&1; code=$?
+printf '%s\n' "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'bg-sleep' AND state = 'active';" > "$tmp/bgcheck.sql"
+if [ "$code" -eq 0 ] && [[ "$(bash "$script" run "$tmp/bgcheck.sql" 2>&1)" == *" 1"* ]]; then ok "bg виден в pg_stat_activity"; else bad "bg (код $code: $(cat "$tmp/bg.out"))"; fi
+
+# 7. bg: нет блока и страницы
+bash "$script" bg "$tmp/page.md" nope.sql >/dev/null 2>&1; code=$?
+if [ "$code" -eq 1 ]; then ok "bg: нет блока"; else bad "bg: нет блока (код $code)"; fi
+bash "$script" bg "$tmp/nope.md" bg-sleep.sql >/dev/null 2>&1; code=$?
+if [ "$code" -eq 1 ]; then ok "bg: нет страницы"; else bad "bg: нет страницы (код $code)"; fi
+
+# 8. down идемпотентен
 bash "$script" down >/dev/null 2>&1 && bash "$script" down >/dev/null 2>&1; code=$?
 if [ "$code" -eq 0 ]; then ok "down дважды"; else bad "down дважды (код $code)"; fi
 
