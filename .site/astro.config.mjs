@@ -90,6 +90,7 @@ const sidebar = [
               'Классические SQL-задачи', 'CTE и LATERAL', 'CASE COALESCE NULLIF', 'Ловушки SQL',
             ]),
           },
+          { label: 'SQL-рецепты', items: pages('Бэкенд/Базы данных/SQL-рецепты', ['Схема библиотеки']) },
           {
             label: 'Redis',
             items: pages('Бэкенд/Базы данных/Redis', [
