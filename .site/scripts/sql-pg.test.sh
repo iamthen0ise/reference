@@ -46,7 +46,19 @@ ${fence}
 ${fence}sql title="bg-sleep.sql"
 SELECT pg_sleep(5);
 ${fence}
+
+${fence}sql title="bg-late.sql"
+SET statement_timeout = '20s';
+\\! sleep 2
+BEGIN;
+UPDATE t SET id = id WHERE id = 1;
+\\! sleep 6
+${fence}
 MD
+
+# Страница с CRLF и пробелами после ограждения: блок должен находиться.
+printf '%s\r\n' '```sql title="crlf.sql"' 'SELECT 7 AS seven;' '```' > "$tmp/crlf.md"
+printf '%s\n' '```sql title="trail.sql"  ' 'SELECT 8 AS eight;' '```  ' > "$tmp/trail.md"
 
 # 1. нет блока
 err="$(bash "$script" block "$tmp/page.md" nope.sql 2>&1 >/dev/null)"; code=$?
@@ -61,27 +73,46 @@ SQL_PG_PAGE="$tmp/page.md" bash "$script" up small >"$tmp/up.out" 2>&1; code=$?
 if [ "$code" -eq 0 ] && [ "$(tail -n1 "$tmp/up.out")" = "ready: reference-pg-test (small)" ]; then ok "up small"; else bad "up small (код $code)"; tail -n5 "$tmp/up.out"; fi
 
 out="$(bash "$script" block "$tmp/page.md" one.sql 2>&1)"; code=$?
-if [ "$code" -eq 0 ] && [[ "$out" == *" one "* ]] && [[ "$out" == *"1"* ]]; then ok "SELECT 1"; else bad "SELECT 1 ($code: $out)"; fi
+want=$' one \n-----\n   1\n(1 row)'
+if [ "$code" -eq 0 ] && [ "$out" = "$want" ]; then ok "SELECT 1"; else bad "SELECT 1 ($code: $out)"; fi
 
 # 4. ошибка SQL
 bash "$script" block "$tmp/page.md" err.sql >/dev/null 2>&1; code=$?
 if [ "$code" -ne 0 ]; then ok "ошибка SQL"; else bad "ошибка SQL дала код 0"; fi
 
 # 5. данные seed-small загружены, расширение на месте
-printf '%s\n' "SELECT count(*) AS n FROM t;" "SELECT extname FROM pg_extension WHERE extname='pg_stat_statements';" > "$tmp/check.sql"
-out="$(bash "$script" run "$tmp/check.sql" 2>&1)"
-if [[ "$out" == *" 1"* ]] && [[ "$out" == *"pg_stat_statements"* ]]; then ok "seed и расширение"; else bad "seed и расширение ($out)"; fi
+pq() { docker exec "$SQL_PG_CONTAINER" psql -X -q -t -A -U postgres -d library -c "$1"; }
+out="$(pq "SELECT count(*) FROM t")"
+if [ "$out" = "1" ]; then ok "seed: одна строка"; else bad "seed: одна строка ('$out')"; fi
+out="$(pq "SELECT extname FROM pg_extension WHERE extname = 'pg_stat_statements'")"
+if [ "$out" = "pg_stat_statements" ]; then ok "расширение"; else bad "расширение ('$out')"; fi
+
+# 5a. CRLF и пробелы после ограждения
+out="$(bash "$script" block "$tmp/crlf.md" crlf.sql 2>&1)"; code=$?
+if [ "$code" -eq 0 ] && [[ "$out" == *"7"* ]]; then ok "страница с CRLF"; else bad "страница с CRLF (код $code: $out)"; fi
+out="$(bash "$script" block "$tmp/trail.md" trail.sql 2>&1)"; code=$?
+if [ "$code" -eq 0 ] && [[ "$out" == *"8"* ]]; then ok "пробелы после ограждения"; else bad "пробелы после ограждения (код $code: $out)"; fi
 
 # 6. bg: фоновая сессия видна в pg_stat_activity под именем блока
 bash "$script" bg "$tmp/page.md" bg-sleep.sql >"$tmp/bg.out" 2>&1; code=$?
-printf '%s\n' "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'bg-sleep';" > "$tmp/bgcheck.sql"
-if [ "$code" -eq 0 ] && [[ "$(bash "$script" run "$tmp/bgcheck.sql" 2>&1)" == *" 1"* ]]; then ok "bg виден в pg_stat_activity"; else bad "bg (код $code: $(cat "$tmp/bg.out"))"; fi
+out="$(pq "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'bg-sleep'")"
+if [ "$code" -eq 0 ] && [ "$out" = "1" ]; then ok "bg виден в pg_stat_activity"; else bad "bg (код $code, '$out': $(cat "$tmp/bg.out"))"; fi
+
+# 6a. bg возвращается, когда блок дошёл до работы, а не при подключении psql
+bash "$script" bg "$tmp/page.md" bg-late.sql >"$tmp/bg.out" 2>&1; code=$?
+out="$(pq "SELECT state FROM pg_stat_activity WHERE application_name = 'bg-late'")"
+if [ "$code" -eq 0 ] && [ "$out" = "idle in transaction" ]; then ok "bg ждёт начала работы блока"; else bad "bg ждёт начала работы блока (код $code, state '$out')"; fi
 
 # 7. bg: нет блока и страницы
 bash "$script" bg "$tmp/page.md" nope.sql >/dev/null 2>&1; code=$?
 if [ "$code" -eq 1 ]; then ok "bg: нет блока"; else bad "bg: нет блока (код $code)"; fi
 bash "$script" bg "$tmp/nope.md" bg-sleep.sql >/dev/null 2>&1; code=$?
 if [ "$code" -eq 1 ]; then ok "bg: нет страницы"; else bad "bg: нет страницы (код $code)"; fi
+
+# 7a. сбой схемы после docker run снимает контейнер
+printf '%s\n' '```sql title="schema.sql"' 'SELECT * FROM nope;' '```' '' '```sql title="seed-small.sql"' 'SELECT 1;' '```' > "$tmp/broken.md"
+SQL_PG_PAGE="$tmp/broken.md" bash "$script" up small >/dev/null 2>&1; code=$?
+if [ "$code" -ne 0 ] && [ -z "$(docker ps -aq --filter name=^reference-pg-test$)" ]; then ok "up: сбой схемы снимает контейнер"; else bad "up: сбой схемы (код $code)"; fi
 
 # 8. down идемпотентен
 bash "$script" down >/dev/null 2>&1 && bash "$script" down >/dev/null 2>&1; code=$?

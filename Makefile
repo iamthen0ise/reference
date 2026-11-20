@@ -47,7 +47,7 @@ sql-bg:
 	bash .site/scripts/sql-pg.sh bg "$(PAGE)" "$(TITLE)"
 
 sql-psql:
-	docker exec -it reference-pg psql -U postgres -d library
+	docker exec -it $${SQL_PG_CONTAINER:-reference-pg} psql -U postgres -d library
 
 sql-down:
 	bash .site/scripts/sql-pg.sh down

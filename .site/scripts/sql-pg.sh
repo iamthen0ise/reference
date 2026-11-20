@@ -19,21 +19,36 @@ psql_run() {
 }
 
 # Печатает тело блока ```sql title="<title>"; код 1, если блока нет или он не один.
+# Заголовок идёт через ENVIRON (awk -v разворачивает обратные слэши); концевые пробелы
+# и \r строки отбрасываются перед сравнением, так что страница с CRLF находится.
 extract_block() {
-  local page="$1" title="$2" n
+  local page="$1" title="$2" n want
   [ -f "$page" ] || { echo "page not found: $page" >&2; return 1; }
-  n="$(awk -v t="\`\`\`sql title=\"$title\"" '$0 == t { c++ } END { print c + 0 }' "$page")"
+  want="\`\`\`sql title=\"$title\""
+  n="$(SQL_T="$want" awk '
+    { sub(/[ \t\r]+$/, "") }
+    $0 == ENVIRON["SQL_T"] { c++ }
+    END { print c + 0 }' "$page")"
   if [ "$n" -eq 0 ]; then echo "block not found: $title" >&2; return 1; fi
   if [ "$n" -gt 1 ]; then echo "block not unique: $title" >&2; return 1; fi
-  awk -v t="\`\`\`sql title=\"$title\"" '
-    $0 == t { on = 1; next }
+  SQL_T="$want" awk '
+    { sub(/[ \t\r]+$/, "") }
+    $0 == ENVIRON["SQL_T"] { on = 1; next }
     on && $0 == "```" { exit }
     on { print }
   ' "$page"
 }
 
-# Блок в фоновой сессии: application_name = имя блока без .sql. Возвращается, когда сессия
-# видна в pg_stat_activity (до 10 с, иначе код 1). Срок жизни сессии ограничивает сам блок.
+# Блок в фоновой сессии: application_name = имя блока без .sql. Возвращается, когда блок
+# начал работу (до 10 с, иначе код 1): сессия вышла за ведущие SET и BEGIN и либо держит
+# транзакцию (idle in transaction), либо выполняет запрос (active), либо ждёт блокировку.
+# Срок жизни сессии ограничивает сам блок.
+bg_fail() {
+  docker exec "$container" rm -f "$1" >/dev/null 2>&1 || true
+  echo "$2" >&2
+  return 1
+}
+
 cmd_bg() {
   local page="$1" title="$2" name body file i seen
   body="$(extract_block "$page" "$title")" || return 1
@@ -42,34 +57,47 @@ cmd_bg() {
     ""|*[!A-Za-z0-9_-]*) echo "bad block name for bg: $title" >&2; return 1 ;;
   esac
   file="/tmp/bg-$name-$$-$RANDOM.sql"
-  printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' sh "$file"
+  printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' sh "$file" \
+    || { bg_fail "$file" "cannot copy block to $container: $name"; return 1; }
   # Файл удаляется сразу после psql. Пределы проверки: она ищет только application_name,
-  # поэтому оставшаяся сессия с тем же именем даст ложное «видна», а блок короче 0,5 с
-  # успеет завершиться раньше опроса и даст ложный код 1. Имена фоновых блоков уникальны.
+  # поэтому оставшаяся сессия с тем же именем даст ложное «готова», а блок, завершившийся
+  # раньше опроса, даст ложный код 1. Имена фоновых блоков уникальны.
   docker exec -d -e PGAPPNAME="$name" "$container" sh -c \
-    'psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$1"; rm -f "$1"' sh "$file"
+    'psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$1"; rm -f "$1"' sh "$file" \
+    || { bg_fail "$file" "cannot start bg session: $name"; return 1; }
   for i in $(seq 1 20); do
-    seen="$(docker exec "$container" psql -X -q -t -A -U postgres -d library \
-      -c "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$name'")"
+    seen="$(docker exec "$container" psql -X -q -t -A -U postgres -d library -c \
+      "SELECT count(*) FROM pg_stat_activity
+       WHERE application_name = '$name'
+         AND (state IN ('active', 'idle in transaction') OR wait_event_type = 'Lock')
+         AND query !~* '^[[:space:]]*(set|begin|start[[:space:]]+transaction)\\y'")" \
+      || { bg_fail "$file" "cannot poll pg_stat_activity: $name"; return 1; }
     if [ "$seen" -gt 0 ]; then return 0; fi
     sleep 0.5
   done
-  echo "bg session not visible in 10s: $name" >&2
-  return 1
+  bg_fail "$file" "bg session did not start its work in 10s: $name"
 }
 
 cmd_down() {
   docker rm -f "$container" >/dev/null 2>&1 || true
 }
 
+# Выход из cmd_up с ошибкой после docker run: полусобранная база не остаётся.
+up_cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then cmd_down; echo "db not ready, container removed: $container" >&2; fi
+}
+
 cmd_up() {
   local seed="${1:-small}" i
   case "$seed" in small|big) ;; *) echo "seed must be small or big" >&2; exit 2 ;; esac
-  # Блоки читаем до пересоздания контейнера: ошибка в странице не оставит пустой базы.
+  # Блоки читаем до пересоздания контейнера: ошибка в самой странице (нет блока) не заденет
+  # работающую базу. Ошибка после docker run (старт, схема, данные) снимает контейнер.
   local schema seedsql
   schema="$(extract_block "$schema_page" schema.sql)"
   seedsql="$(extract_block "$schema_page" "seed-$seed.sql")"
   cmd_down
+  trap up_cleanup EXIT
   docker run -d --name "$container" \
     -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=library \
     "$image" -c shared_preload_libraries=pg_stat_statements -c track_io_timing=on >/dev/null
@@ -82,6 +110,7 @@ cmd_up() {
   printf '%s\n' "$schema" | psql_run
   printf '%s\n' "$seedsql" | psql_run
   printf '%s\n' "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" "VACUUM ANALYZE;" | psql_run
+  trap - EXIT
   echo "ready: $container ($seed)"
 }
 
