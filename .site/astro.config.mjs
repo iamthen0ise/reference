@@ -63,6 +63,10 @@ const sidebar = [
         label: 'Прикладное',
         items: pages('Python/Прикладное', ['Деньги и числа', 'Логирование', 'pytest и моки', 'SQLAlchemy async']),
       },
+      {
+        label: 'Рецепты',
+        items: pages('Python/Рецепты', ['Выбор примитива синхронизации']),
+      },
     ],
   },
   {
