@@ -43,8 +43,11 @@ cmd_bg() {
   esac
   file="/tmp/bg-$name-$$-$RANDOM.sql"
   printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' sh "$file"
-  docker exec -d -e PGAPPNAME="$name" "$container" \
-    psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$file"
+  # Файл удаляется сразу после psql. Пределы проверки: она ищет только application_name,
+  # поэтому оставшаяся сессия с тем же именем даст ложное «видна», а блок короче 0,5 с
+  # успеет завершиться раньше опроса и даст ложный код 1. Имена фоновых блоков уникальны.
+  docker exec -d -e PGAPPNAME="$name" "$container" sh -c \
+    'psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$1"; rm -f "$1"' sh "$file"
   for i in $(seq 1 20); do
     seen="$(docker exec "$container" psql -X -q -t -A -U postgres -d library \
       -c "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$name'")"

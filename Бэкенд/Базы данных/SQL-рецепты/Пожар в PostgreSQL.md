@@ -11,17 +11,17 @@ title: Пожар в PostgreSQL
 1. Посмотреть, что выполняется: `pg_stat_activity`, колонки `state`, `wait_event_type`, `wait_event`, возраст запроса и транзакции ([раздел](#что-выполняется-сейчас)).
 2. Найти, кто кого блокирует: `pg_blocking_pids` и цепочка до корня ([раздел](#кто-кого-блокирует)). Чинить надо корень, а не очередь за ним.
 3. Понять, что делает корень: активный запрос или `idle in transaction`. Во втором случае запрос отменять нечего.
-4. Снять мягко: `pg_cancel_backend` — отменяет текущий запрос, сессия остаётся. Сначала ожидающие, потом корень, если у него есть запрос ([раздел](#как-снять)).
-5. Не помогло, а корень простаивает в транзакции: `pg_terminate_backend`. Транзакция откатится, изменения пропадут.
+4. Снять мягко: `pg_cancel_backend` отменяет текущий запрос, сессия остаётся. Отменять нужно запрос корня, если он у него есть; ожидающих отменять смысла нет, пожар они не тушат ([раздел](#как-снять)).
+5. Корень простаивает в транзакции или отмена не помогла: `pg_terminate_backend` корня. Транзакция откатится, изменения пропадут.
 6. Проверить соединения: сколько занято и в каких состояниях, против `max_connections` ([раздел](#соединения-и-лимит)).
 7. После пожара: `lock_timeout` для миграций, `statement_timeout` и `idle_in_transaction_session_timeout` для приложения ([раздел](#таймауты-против-пожара)).
 
 ## Как читать страницу
 
-Порядок запуска на `small` (блокировки не зависят от размера таблицы): `make sql-up SEED=small`; блок `row-before.sql`; в фоне по очереди `fire-holder.sql`, `fire-waiter.sql`, `fire-alter.sql`, `fire-reader.sql` (между запусками пауза в секунду); дальше по порядку страницы `who-is-running.sql`, `who-blocks-whom.sql`, `blocking-chain.sql`, `connections-by-state.sql`, `connections-limit.sql`, `cancel-waiter.sql`, `cancel-holder.sql`, `terminate-holder.sql`, `row-after.sql`, `timeout-settings.sql`; снова в фоне `fire-holder.sql`, затем `statement-timeout.sql`, `lock-timeout.sql`, `terminate-holder.sql`; в фоне `idle-holder.sql`, сразу `idle-seen.sql`, через 5 секунд `idle-gone.sql`.
+Порядок запуска на `small` (блокировки не зависят от размера таблицы): `make sql-up SEED=small`; блок `row-before.sql`; в фоне по очереди `fire-holder.sql`, `fire-waiter.sql`, `fire-alter.sql`, `fire-reader.sql` (между запусками пауза в секунду); дальше по порядку страницы `who-is-running.sql`, `who-blocks-whom.sql`, `blocking-chain.sql`, `connections-by-state.sql`, `connections-limit.sql`, `cancel-waiter.sql`, `cancel-holder.sql`, `terminate-holder.sql`, `row-after.sql`, `timeout-settings.sql`; снова в фоне `fire-holder-2.sql` (тот же держатель под другим именем), затем `statement-timeout.sql`, `lock-timeout.sql`, `terminate-holder-2.sql`; в фоне `idle-holder.sql`, сразу `idle-seen.sql`, через 5 секунд `idle-gone.sql`.
 
 - Фоновый блок запускается `make sql-bg PAGE="$P" TITLE="<имя>.sql"`, обычный — `make sql-block PAGE="$P" TITLE="<имя>.sql"`, где `P="Бэкенд/Базы данных/SQL-рецепты/Пожар в PostgreSQL.md"`. `sql-bg` копирует блок в контейнер, запускает `psql -f` в фоне и возвращается, когда сессия появилась в `pg_stat_activity`. Её `application_name` равно имени блока без `.sql`: по нему сессии и различаются в выводе.
-- Сессии не остаются висеть. У каждой фоновой сессии срок жизни ограничивает сервер, а не терпение: `idle_in_transaction_session_timeout` у держателя строки, `lock_timeout` и `statement_timeout` у остальных, потолок 50 секунд. Проверено прогоном: через 58 секунд после запуска всех четырёх сессий `pg_stat_activity` пуст и в контейнере не осталось ни одного фонового `psql`.
+- Сессии не остаются висеть. У каждой фоновой сессии срок жизни ограничивает сервер, а не терпение: `idle_in_transaction_session_timeout` у держателя строки, `lock_timeout` и `statement_timeout` у остальных, потолок 50 секунд. Это следует из таймаутов: самая долгая из четырёх сессий живёт 55 секунд (`\! sleep 55`), так что за минуту после запуска не остаётся ни сессий, ни фоновых `psql`.
 - Из-за этого потолка на сценарий пожара есть около 50 секунд от запуска `fire-holder.sql`. Не успели, и сервер сам закрыл держателя, тогда `make sql-up SEED=small` и всё сначала.
 - Держатель удерживает транзакцию так: после `BEGIN` и `UPDATE` клиент не завершает работу, а ждёт командой `\! sleep` — соединение остаётся открытым, а `psql -f` не доходит до конца файла, при котором сессия закрылась бы и транзакция откатилась.
 - Блоки с `\set ON_ERROR_STOP off` показывают ошибку и идут дальше: без этого `psql` завершился бы с кодом 1.
@@ -299,7 +299,7 @@ WHERE datname = 'library' AND pid <> pg_backend_pid();
 (0 rows)
 ```
 
-Сессия закрыта, и список после паузы пуст: получив строку, миграция и читатель отработали и завершились. Что стало с транзакцией держателя, видно по данным.
+Сессия закрыта, и список после паузы пуст: освободилась таблица, и миграция с читателем отработали и завершились. Что стало с транзакцией держателя, видно по данным.
 
 ```sql title="row-after.sql"
 SELECT id, due_at,
@@ -345,7 +345,7 @@ ORDER BY name;
 
 Ограничивает время одного запроса, считая и ожидание блокировки. Запустим снова держателя, чтобы строка была занята.
 
-```sql title="fire-holder.sql"
+```sql title="fire-holder-2.sql"
 -- Сессия-корень: открывает транзакцию, меняет строку и молчит.
 SET idle_in_transaction_session_timeout = '50s';  -- сервер закроет сессию сам
 BEGIN;
@@ -393,9 +393,9 @@ ERROR:  canceling statement due to lock timeout
 
 Теперь убрать держателя.
 
-```sql title="terminate-holder.sql"
+```sql title="terminate-holder-2.sql"
 SELECT pg_terminate_backend(pid) AS terminated
-FROM pg_stat_activity WHERE application_name = 'fire-holder';
+FROM pg_stat_activity WHERE application_name = 'fire-holder-2';
 SELECT pg_sleep(1);
 SELECT application_name AS session, state
 FROM pg_stat_activity
@@ -458,10 +458,10 @@ SELECT (SELECT count(*) FROM pg_stat_activity
 (1 row)
 ```
 
-Сервер отметил закрытие в своём журнале. Команда запускается из корня репозитория.
+Сервер отметил закрытие в своём журнале. Это единственный блок страницы не из `make sql-block`: команда `bash` запускается из корня репозитория, а `tail -1` оставляет последнюю такую строку, если до неё в контейнере уже закрывались другие сессии.
 
 ```bash title="idle-log.sh"
-docker logs reference-pg 2>&1 | grep -o 'FATAL.*idle-in-transaction.*'
+docker logs reference-pg 2>&1 | grep -o 'FATAL.*idle-in-transaction.*' | tail -1
 ```
 
 ```text title="Вывод"

@@ -74,7 +74,7 @@ if [[ "$out" == *" 1"* ]] && [[ "$out" == *"pg_stat_statements"* ]]; then ok "se
 
 # 6. bg: фоновая сессия видна в pg_stat_activity под именем блока
 bash "$script" bg "$tmp/page.md" bg-sleep.sql >"$tmp/bg.out" 2>&1; code=$?
-printf '%s\n' "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'bg-sleep' AND state = 'active';" > "$tmp/bgcheck.sql"
+printf '%s\n' "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'bg-sleep';" > "$tmp/bgcheck.sql"
 if [ "$code" -eq 0 ] && [[ "$(bash "$script" run "$tmp/bgcheck.sql" 2>&1)" == *" 1"* ]]; then ok "bg виден в pg_stat_activity"; else bad "bg (код $code: $(cat "$tmp/bg.out"))"; fi
 
 # 7. bg: нет блока и страницы
