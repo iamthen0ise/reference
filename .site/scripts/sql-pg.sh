@@ -19,60 +19,78 @@ psql_run() {
 }
 
 # Печатает тело блока ```sql title="<title>"; код 1, если блока нет или он не один.
-# Заголовок идёт через ENVIRON (awk -v разворачивает обратные слэши); концевые пробелы
-# и \r строки отбрасываются перед сравнением, так что страница с CRLF находится.
+# Заголовок идёт через ENVIRON (awk -v разворачивает обратные слэши). Для сравнения с
+# ограждениями концевые пробелы и \r отбрасываются, так что страница с CRLF находится;
+# строки тела печатаются как есть, без \r: концевые пробелы бывают частью SQL.
 extract_block() {
   local page="$1" title="$2" n want
   [ -f "$page" ] || { echo "page not found: $page" >&2; return 1; }
   want="\`\`\`sql title=\"$title\""
   n="$(SQL_T="$want" awk '
-    { sub(/[ \t\r]+$/, "") }
-    $0 == ENVIRON["SQL_T"] { c++ }
+    { line = $0; sub(/[ \t\r]+$/, "", line) }
+    line == ENVIRON["SQL_T"] { c++ }
     END { print c + 0 }' "$page")"
   if [ "$n" -eq 0 ]; then echo "block not found: $title" >&2; return 1; fi
   if [ "$n" -gt 1 ]; then echo "block not unique: $title" >&2; return 1; fi
   SQL_T="$want" awk '
-    { sub(/[ \t\r]+$/, "") }
-    $0 == ENVIRON["SQL_T"] { on = 1; next }
-    on && $0 == "```" { exit }
-    on { print }
+    { line = $0; sub(/[ \t\r]+$/, "", line); body = $0; sub(/\r$/, "", body) }
+    line == ENVIRON["SQL_T"] { on = 1; next }
+    on && line == "```" { exit }
+    on { print body }
   ' "$page"
 }
 
 # Блок в фоновой сессии: application_name = имя блока без .sql. Возвращается, когда блок
 # начал работу (до 10 с, иначе код 1): сессия вышла за ведущие SET и BEGIN и либо держит
 # транзакцию (idle in transaction), либо выполняет запрос (active), либо ждёт блокировку.
-# Срок жизни сессии ограничивает сам блок.
+# Блок, завершившийся раньше опроса, узнаётся по коду psql в файле <file>.rc: код 0 — успех,
+# иначе код 1. Сессия с тем же application_name уже есть — код 1 сразу: иначе проверка
+# приняла бы её за новую. Срок жизни сессии ограничивает сам блок.
 bg_fail() {
-  docker exec "$container" rm -f "$1" >/dev/null 2>&1 || true
+  docker exec "$container" rm -f "$1" "$1.rc" >/dev/null 2>&1 || true
   echo "$2" >&2
   return 1
 }
 
+bg_count() {
+  docker exec "$container" psql -X -q -t -A -U postgres -d library -c \
+    "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$1' $2"
+}
+
 cmd_bg() {
-  local page="$1" title="$2" name body file i seen
+  local page="$1" title="$2" name body file i seen rc
   body="$(extract_block "$page" "$title")" || return 1
   name="${title%.sql}"
   case "$name" in
     ""|*[!A-Za-z0-9_-]*) echo "bad block name for bg: $title" >&2; return 1 ;;
   esac
+  seen="$(bg_count "$name" "")" || { echo "cannot poll pg_stat_activity: $name" >&2; return 1; }
+  if [ "$seen" -gt 0 ]; then echo "bg session already running: $name" >&2; return 1; fi
+  # .rc прошлых запусков этого блока: sql-bg мог вернуться по pg_stat_activity раньше, чем
+  # psql записал код. Сессии с этим именем нет, значит и их psql уже не пишет.
+  docker exec "$container" sh -c 'rm -f /tmp/bg-"$1"-*.sql.rc' sh "$name" \
+    || { echo "cannot clean old bg exit codes: $name" >&2; return 1; }
   file="/tmp/bg-$name-$$-$RANDOM.sql"
   printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' sh "$file" \
     || { bg_fail "$file" "cannot copy block to $container: $name"; return 1; }
-  # Файл удаляется сразу после psql. Пределы проверки: она ищет только application_name,
-  # поэтому оставшаяся сессия с тем же именем даст ложное «готова», а блок, завершившийся
-  # раньше опроса, даст ложный код 1. Имена фоновых блоков уникальны.
+  # После psql: файл блока удаляется, код пишется атомарно (mv).
   docker exec -d -e PGAPPNAME="$name" "$container" sh -c \
-    'psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$1"; rm -f "$1"' sh "$file" \
+    'psql -X -q -v ON_ERROR_STOP=1 -P pager=off -U postgres -d library -f "$1"
+     echo $? > "$1.rc.tmp"; mv "$1.rc.tmp" "$1.rc"; rm -f "$1"' sh "$file" \
     || { bg_fail "$file" "cannot start bg session: $name"; return 1; }
   for i in $(seq 1 20); do
-    seen="$(docker exec "$container" psql -X -q -t -A -U postgres -d library -c \
-      "SELECT count(*) FROM pg_stat_activity
-       WHERE application_name = '$name'
+    seen="$(bg_count "$name" "
          AND (state IN ('active', 'idle in transaction') OR wait_event_type = 'Lock')
          AND query !~* '^[[:space:]]*(set|begin|start[[:space:]]+transaction)\\y'")" \
       || { bg_fail "$file" "cannot poll pg_stat_activity: $name"; return 1; }
     if [ "$seen" -gt 0 ]; then return 0; fi
+    rc="$(docker exec "$container" sh -c 'if [ -f "$1.rc" ]; then cat "$1.rc"; fi' sh "$file")" \
+      || { bg_fail "$file" "cannot read bg exit code: $name"; return 1; }
+    case "$rc" in
+      "") ;;
+      0) docker exec "$container" rm -f "$file.rc" >/dev/null 2>&1 || true; return 0 ;;
+      *) bg_fail "$file" "bg block failed with code $rc: $name"; return 1 ;;
+    esac
     sleep 0.5
   done
   bg_fail "$file" "bg session did not start its work in 10s: $name"
