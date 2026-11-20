@@ -57,6 +57,200 @@ Execution Time: 0.14 ms
 | Hash Join | строит хеш-таблицу по меньшей стороне и ищет в ней строки большей | большие наборы, условие на равенство |
 | Merge Join (слияние) | сливает две уже отсортированные последовательности | обе стороны уже отсортированы индексом |
 
+## Как работают узлы: схема и модель в коде
+
+Ниже схемы и модели на Python в несколько строк: как узлы передают строки друг другу, как читают таблицу и как соединяют две таблицы. Модели упрощены, но дают те же эффекты, что видны в реальных планах дальше по странице.
+
+### План — дерево итераторов
+
+Исполнитель Postgres работает «по запросу»: верхний узел просит у дочернего следующую строку, тот — у своего, и так до узла чтения таблицы. Строки поднимаются вверх по одной, а не целыми таблицами. Отсюда две стоимости в `cost=начало..всё`. Большинство узлов отдают первую строку сразу, и тогда `Limit` останавливает работу всего плана рано. А `Sort` и `Hash` — «блокирующие» узлы: прежде чем отдать первую строку, им нужно прочитать всех детей до конца.
+
+```mermaid
+flowchart TD
+    l["Limit 2"] -- "дай строку" --> s["Sort по total"]
+    s -- "дай строку, и так до конца" --> sc["Seq Scan on orders, Filter: user_id = 3"]
+    sc -. "строка" .-> s
+    s -. "строка, но только когда прочитал всё" .-> l
+```
+
+```python
+stats = {"rows_read": 0}
+
+
+def seq_scan(table, cond):          # Seq Scan + Filter
+    for row in table:
+        stats["rows_read"] += 1
+        if cond(row):
+            yield row               # отдаём строку вверх и ждём, пока попросят следующую
+
+
+def sort(child, key):               # блокирующий узел: сначала прочитать всё
+    rows = list(child)
+    rows.sort(key=key)
+    yield from rows
+
+
+def limit(child, n):
+    if n == 0:
+        return
+    for row in child:
+        yield row
+        n -= 1
+        if n == 0:
+            return                  # больше не просим строк: нижние узлы просто останавливаются
+
+
+orders = [{"id": i, "user_id": i % 10, "total": (i * 37) % 100} for i in range(1000)]
+
+list(limit(seq_scan(orders, lambda r: r["user_id"] == 3), 2))
+# id 3 и 13, rows_read = 14 — прочитали 14 строк из 1000
+
+stats["rows_read"] = 0
+list(limit(sort(seq_scan(orders, lambda r: r["user_id"] == 3), key=lambda r: r["total"]), 2))
+# id 73 и 173, rows_read = 1000 — Sort не отдаст ни строки, пока не прочитает таблицу целиком
+```
+
+Поэтому `ORDER BY ... LIMIT` без подходящего индекса дорогой: план вынужден отсортировать всё. Индекс по `total` выдаёт строки уже по порядку, Sort исчезает, и `Limit` снова останавливает план рано.
+
+### Seq Scan, Index Scan и Bitmap Heap Scan: в каком порядке читаются страницы
+
+Таблица лежит на страницах по 8 КБ, а индекс хранит ключи по порядку вместе с адресом строки `(страница, позиция)`. Три способа чтения отличаются тем, какие страницы и в каком порядке они читают.
+
+```mermaid
+flowchart LR
+    subgraph is["Index Scan"]
+        i1["индекс: ключи по порядку"] --> i2["стр. 0 → стр. 5 → стр. 0 → стр. 5 → стр. 1 → стр. 6"]
+    end
+    subgraph bs["Bitmap Index Scan + Bitmap Heap Scan"]
+        b1["индекс: собрать номера страниц"] --> b2["карта: 1 1 0 0 0 1 1 0 0 0"] --> b3["стр. 0, 1, 5, 6 — по разу и по порядку, перепроверить условие"]
+    end
+    subgraph ss["Seq Scan"]
+        s1["стр. 0, 1, 2 … 9 подряд, фильтр на каждой строке"]
+    end
+```
+
+```python
+ROWS_PER_PAGE = 4
+table = [                           # 10 страниц по 4 строки, user_id разбросаны по таблице
+    [{"id": p * ROWS_PER_PAGE + s, "user_id": (p * ROWS_PER_PAGE + s) * 7 % 20} for s in range(ROWS_PER_PAGE)]
+    for p in range(10)
+]
+index = sorted(                     # B-tree по user_id: (ключ, (страница, позиция))
+    (row["user_id"], (page_no, slot))
+    for page_no, page in enumerate(table)
+    for slot, row in enumerate(page)
+)
+pages_read = []
+
+
+def read_page(page_no):
+    pages_read.append(page_no)
+    return table[page_no]
+
+
+def seq_scan(cond):                 # все страницы подряд
+    for page_no in range(len(table)):
+        for row in read_page(page_no):
+            if cond(row):
+                yield row
+
+
+def index_scan(lo, hi):             # по индексу, и за каждой строкой — в её страницу
+    for key, (page_no, slot) in index:
+        if key > hi:
+            return
+        if key >= lo:
+            yield read_page(page_no)[slot]
+
+
+def bitmap_heap_scan(lo, hi):
+    bitmap = [False] * len(table)   # Bitmap Index Scan: только отметить нужные страницы
+    for key, (page_no, _) in index:
+        if lo <= key <= hi:
+            bitmap[page_no] = True
+    for page_no, needed in enumerate(bitmap):   # Bitmap Heap Scan: страницы по порядку, каждую один раз
+        if needed:
+            for row in read_page(page_no):
+                if lo <= row["user_id"] <= hi:  # Recheck Cond: на странице есть и чужие строки
+                    yield row
+
+
+# WHERE user_id BETWEEN 0 AND 2 — 6 строк:
+# seq_scan    → pages_read = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+# index_scan  → pages_read = [0, 5, 0, 5, 1, 6], строки по порядку user_id: 0, 0, 1, 1, 2, 2
+# bitmap      → pages_read = [0, 1, 5, 6],       строки в порядке страниц: 0, 1, 2, 0, 1, 2
+```
+
+Index Scan прыгает по таблице и может читать одну страницу несколько раз, зато отдаёт строки в порядке индекса, поэтому он хорош для пары строк или для `ORDER BY`. Bitmap Heap Scan читает каждую нужную страницу один раз и по порядку, но порядок ключей теряет. Seq Scan читает всё, зато подряд, а последовательное чтение дешевле случайного (`seq_page_cost = 1` против `random_page_cost = 4`). Когда нужных страниц становится больше заметной доли таблицы, планировщик выбирает Seq Scan.
+
+### Nested Loop, Hash Join и Merge Join
+
+Три способа найти пары `users.id = orders.user_id`. Все дают одни и те же пары, но разной ценой и в разном порядке.
+
+```mermaid
+flowchart LR
+    subgraph nl["Nested Loop"]
+        nl1["каждый user слева"] -- "поиск по индексу<br/>orders.user_id" --> nl2["его заказы справа"]
+    end
+    subgraph hj["Hash Join"]
+        hj1["1. построение:<br/>users → хеш-таблица<br/>в work_mem"] --> hj2["2. проверка:<br/>orders читаются один раз,<br/>каждая строка ищет пару в хеше"]
+    end
+    subgraph mj["Merge Join"]
+        mj1["users по id: 1, 2, 3"] --> mj3["два указателя идут вперёд,<br/>пары при равных ключах"]
+        mj2["orders по user_id:<br/>1, 1, 2, 2, 3"] --> mj3
+    end
+```
+
+```python
+users = [{"id": i} for i in (1, 2, 3)]
+orders = [{"id": 10 + i, "user_id": u} for i, u in enumerate([2, 1, 3, 2, 1])]
+
+
+def nested_loop(outer, inner_lookup):       # цена ≈ строк слева × поиск справа
+    for u in outer:
+        for o in inner_lookup(u["id"]):
+            yield u["id"], o["id"]
+
+
+def hash_join(build, probe):                # цена ≈ одно чтение каждой стороны + память под хеш
+    table = {}
+    for u in build:                         # Hash: меньшая сторона целиком в память
+        table.setdefault(u["id"], []).append(u)
+    for o in probe:                         # большая сторона — один проход
+        for u in table.get(o["user_id"], []):
+            yield u["id"], o["id"]
+
+
+def merge_join(left, right):                # обе стороны уже отсортированы по ключу
+    i = j = 0
+    while i < len(left) and j < len(right):
+        a, b = left[i]["id"], right[j]["user_id"]
+        if a < b:
+            i += 1
+        elif a > b:
+            j += 1
+        else:
+            k = j                           # все строки справа с этим ключом
+            while k < len(right) and right[k]["user_id"] == a:
+                yield a, right[k]["id"]
+                k += 1
+            i += 1
+
+
+orders_by_user = {}                         # роль индекса по orders.user_id
+for o in orders:
+    orders_by_user.setdefault(o["user_id"], []).append(o)
+
+list(nested_loop(users, lambda uid: orders_by_user.get(uid, [])))
+# [(1, 11), (1, 14), (2, 10), (2, 13), (3, 12)] — в порядке левой стороны
+list(hash_join(users, orders))
+# [(2, 10), (1, 11), (3, 12), (2, 13), (1, 14)] — в порядке большой стороны, по ключу не отсортировано
+list(merge_join(users, sorted(orders, key=lambda o: o["user_id"])))
+# [(1, 11), (1, 14), (2, 10), (2, 13), (3, 12)] — сразу по ключу
+```
+
+Отсюда выбор планировщика. Nested Loop выгоден, когда слева мало строк, а справа есть индекс: при 19 пользователях это 19 поисков. Hash Join выгоден для больших наборов с условием на равенство: каждая сторона читается один раз, но меньшая должна поместиться в `work_mem`, иначе хеш разбивается на части (`Batches` больше 1) и уходит на диск. Merge Join выгоден, когда обе стороны уже отсортированы индексом и результат нужен по порядку ключа: он не держит хеш в памяти и не требует сортировки после.
+
 ## Техника: Seq Scan, Index Scan и Bitmap Heap Scan на одной таблице
 
 Таблица `orders` на миллион строк (57 МБ, 7353 страницы), индексы по `id` (первичный ключ) и по `user_id`; `max_parallel_workers_per_gather = 0`, чтобы план не обрастал `Gather`. Одно и то же `SELECT *` читает таблицу тремя способами в зависимости от того, сколько строк нужно и как они лежат:
