@@ -31,7 +31,6 @@ title: "Python: потерянные исключения в async"
 ```python
 import asyncio
 import gc
-import sys
 
 
 async def boom() -> None:
@@ -56,9 +55,9 @@ print("конец программы", flush=True)
 ```text title="Вывод"
 task.done()=True, никто не вызывал task.exception()
 Task exception was never retrieved
-future: <Task finished name='boom' coro=<boom() done, defined at never_retrieved.py:6> exception=RuntimeError('упала в фоне')>
+future: <Task finished name='boom' coro=<boom() done, defined at never_retrieved.py:5> exception=RuntimeError('упала в фоне')>
 Traceback (most recent call last):
-  File "never_retrieved.py", line 7, in boom
+  File "never_retrieved.py", line 6, in boom
     raise RuntimeError("упала в фоне")
 RuntimeError: упала в фоне
 после del
@@ -217,16 +216,16 @@ main пошёл дальше
 ```text title="Вывод: never_retrieved.py под -X dev"
 task.done()=True, никто не вызывал task.exception()
 Task exception was never retrieved
-future: <Task finished name='boom' coro=<boom() done, defined at never_retrieved.py:6> exception=RuntimeError('упала в фоне') created at <stdlib>/asyncio/tasks.py:404>
+future: <Task finished name='boom' coro=<boom() done, defined at never_retrieved.py:5> exception=RuntimeError('упала в фоне') created at <stdlib>/asyncio/tasks.py:404>
 source_traceback: Object created at (most recent call last):
-  File "never_retrieved.py", line 21, in <module>
+  File "never_retrieved.py", line 20, in <module>
     asyncio.run(main())
   ...
-  File "never_retrieved.py", line 11, in main
+  File "never_retrieved.py", line 10, in main
     task = asyncio.create_task(boom(), name="boom")
   ...
 Traceback (most recent call last):
-  File "never_retrieved.py", line 7, in boom
+  File "never_retrieved.py", line 6, in boom
     raise RuntimeError("упала в фоне")
 RuntimeError: упала в фоне
 после del
@@ -259,7 +258,7 @@ asyncio.run(main())
 Без флагов блок ничего не печатает. Под `PYTHONASYNCIODEBUG=1` (то же под `-X dev`):
 
 ```text title="Вывод: slow_cb.py под PYTHONASYNCIODEBUG=1"
-Executing <Task finished name='Task-1' coro=<main() done, defined at slow_cb.py:11> result=None created at <stdlib>/asyncio/runners.py:110> took 0.260 seconds
+Executing <Task finished name='Task-1' coro=<main() done, defined at slow_cb.py:11> result=None created at <stdlib>/asyncio/runners.py:110> took 0.261 seconds
 ```
 
 Строка идёт из логгера `asyncio` на уровне WARNING, поэтому видна даже без настройки логирования. Время зависит от машины: у вас будет около 0.25 секунды. Название задачи и место, где она создана, показывают, кого искать; про лечение блокировок смотрите раздел «Блокирующий вызов в корутине» заметки [[asyncio на практике]].
@@ -268,13 +267,12 @@ Executing <Task finished name='Task-1' coro=<main() done, defined at slow_cb.py:
 
 ## Обработчик ошибок цикла
 
-Если цикл сам встретил ошибку, которую некому обработать (упавший колбэк, задачу собрали с необработанным исключением), он вызывает `loop.call_exception_handler(context)`. По умолчанию это печать через логгер `asyncio`. Своя функция через `loop.set_exception_handler` отправляет то же самое в ваш логгер, в Sentry, куда угодно. `context` это словарь: `message`, `exception` (может не быть), `task` или `handle`.
+Если цикл сам встретил ошибку, которую некому обработать (упавший колбэк, задачу собрали с необработанным исключением), он вызывает `loop.call_exception_handler(context)`. По умолчанию это печать через логгер `asyncio`. Своя функция через `loop.set_exception_handler` отправляет то же самое в ваш логгер, в Sentry, куда угодно. `context` это словарь: `message`, `exception` (может не быть) и, смотря что случилось, `handle` (колбэк) или `future` (для необработанной задачи там лежит она сама).
 
 ```python
 import asyncio
 import gc
 import logging
-import sys
 from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -284,9 +282,9 @@ log = logging.getLogger("app.loop")
 def handle_loop_error(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
     exc = context.get("exception")
     what = context["message"]
-    task = context.get("task")
-    if task is not None:
-        what += f" [task={task.get_name()}]"
+    future = context.get("future")  # для необработанной задачи в контексте лежит она сама
+    if future is not None:
+        what += f" [task={future.get_name()}]"
     log.error("%s", what, exc_info=exc)
 
 
@@ -313,17 +311,17 @@ asyncio.run(main())
 ```
 
 ```text title="Вывод"
-ERROR app.loop: Exception in callback failing_callback() at loop_handler.py:20
+ERROR app.loop: Exception in callback failing_callback() at loop_handler.py:19
 Traceback (most recent call last):
   File "<stdlib>/asyncio/events.py", line 94, in _run
     self._context.run(self._callback, *self._args)
     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "loop_handler.py", line 21, in failing_callback
+  File "loop_handler.py", line 20, in failing_callback
     raise ValueError("упал колбэк")
 ValueError: упал колбэк
-ERROR app.loop: Task exception was never retrieved
+ERROR app.loop: Task exception was never retrieved [task=boom]
 Traceback (most recent call last):
-  File "loop_handler.py", line 25, in boom
+  File "loop_handler.py", line 24, in boom
     raise RuntimeError("упала в фоне")
 RuntimeError: упала в фоне
 ```
@@ -497,8 +495,18 @@ async def forever() -> None:
         log.info("forever: получил отмену и прибрался")
 
 
+async def stubborn() -> None:
+    """Плохая задача: глотает первую отмену. Починка - перевыбросить CancelledError."""
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        log.info("stubborn: проглотила отмену, живёт дальше")
+        await asyncio.sleep(3600)  # вторую отмену (от asyncio.run при выходе) не глотаем
+
+
 async def main() -> None:
     spawn(flusher(), name="flusher")
+    spawn(stubborn(), name="stubborn")
     spawn(exploder(), name="exploder")
     spawn(forever(), name="forever")
     log.info("в работе задач: %d", len(_tasks))
@@ -512,7 +520,7 @@ asyncio.run(main())
 ```
 
 ```text title="Вывод"
-INFO app.tasks: в работе задач: 3
+INFO app.tasks: в работе задач: 4
 ERROR app.tasks: фоновая задача 'exploder' упала
 Traceback (most recent call last):
   File "spawn_demo.py", line 54, in exploder
@@ -522,13 +530,21 @@ INFO app.tasks: flusher: записал пачку 1 из 3
 INFO app.tasks: flusher: записал пачку 2 из 3
 INFO app.tasks: flusher: записал пачку 3 из 3
 INFO app.tasks: forever: получил отмену и прибрался
-INFO app.tasks: отменены при выходе: ['forever']
-INFO app.tasks: осталось ссылок: 0
+INFO app.tasks: stubborn: проглотила отмену, живёт дальше
+ERROR app.tasks: задача 'stubborn' не ответила на отмену
+INFO app.tasks: отменены при выходе: ['forever', 'stubborn']
+INFO app.tasks: осталось ссылок: 1
 ```
 
-Читайте вывод так. Упавшая `exploder` попала в лог сразу, с именем и трейсбеком, а не при сборке мусора. `flusher` успел записать все три пачки, потому что `shutdown` сначала ждёт. `forever` не уложилась в 0,3 с, получила отмену, прибралась в `finally`, и её имя вернулось из `shutdown`. Ссылок в множестве не осталось: ни одна задача не потерялась молча. Время в модели подобрано с запасом, порядок строк от запуска к запуску не меняется.
+Читайте вывод так. Упавшая `exploder` попала в лог сразу, с именем и трейсбеком, а не при сборке мусора. `flusher` успел записать все три пачки, потому что `shutdown` сначала ждёт. `forever` не уложилась в 0,3 с, получила отмену, прибралась в `finally`, и её имя вернулось из `shutdown`. Плохая `stubborn` проглотила отмену: `shutdown` ждал её ещё `CANCEL_GRACE_S`, записал ошибку «не ответила на отмену» и вернул её имя в том же списке отменённых, а в множестве осталась ссылка на неё (`осталось ссылок: 1`). Ни одна задача не потерялась молча: каждая либо дописала, либо названа в логе. Порядок двух строк отмены (`forever` и `stubborn`) может меняться между запусками и версиями: на 3.12 они идут в обратном порядке.
 
-Три замечания по использованию. Вызывайте `shutdown` в `finally` главной корутины или по сигналу остановки, до выхода из `asyncio.run`. Задача, которая игнорирует отмену, не заставит ждать вечно: на ней второй `wait` ограничен `CANCEL_GRACE_S`, а имя такой задачи уходит в лог как ошибка. Если задачи у вас короткие и однородные, проще и надёжнее `TaskGroup`: он сам хранит ссылки и собирает ошибки, но падение одной задачи отменяет остальные (раздел «Падение одной задачи отменяет соседей» заметки [[Ошибки и отмена в asyncio]]). `spawn` нужен там, где задача должна падать независимо.
+Три замечания по использованию. Вызывайте `shutdown` в `finally` главной корутины или по сигналу остановки, до выхода из `asyncio.run`.
+
+Первое и главное: принудительно остановить задачу, которая глотает `CancelledError`, не может никакой код. `shutdown` лишь ждёт ограниченное время и честно называет такую задачу в логе. Дальше `asyncio.run` при выходе отменяет оставшиеся задачи ещё раз и ждёт их без ограничения: если задача глотает и эту отмену, процесс повиснет. В модели `stubborn` проглатывает отмену один раз, поэтому блок завершается; задача, которая глотает каждую, подвесила бы его навсегда. Лечится это только починкой самой задачи: перехватывать `CancelledError` ради уборки и перевыбрасывать ([[#Проглоченная отмена]]). Крайняя мера для процесса, который уже нельзя спасти, это `os._exit`, но он не вызывает `finally` и не сбрасывает буферы.
+
+Второе: если задачи короткие и однородные, проще и надёжнее `TaskGroup`: он сам хранит ссылки и собирает ошибки, но падение одной задачи отменяет остальные (раздел «Падение одной задачи отменяет соседей» заметки [[Ошибки и отмена в asyncio]]). `spawn` нужен там, где задача должна падать независимо.
+
+Третье: `spawn` копирует контекст на момент вызова, поэтому `trace_id` надо установить до `spawn`, а не после (подробности в следующем разделе).
 
 ## trace_id в каждой строке лога
 
@@ -588,7 +604,7 @@ req-B  запрос обработан
 -      после запросов, в главной задаче trace_id=-
 ```
 
-Строки двух запросов чередуются, но у каждой стоит свой `req-A` или `req-B`, включая записи из вложенной задачи: она унаследовала значение. В главной задаче после всего стоит `-`: `trace_id.set` внутри `handle_request` изменил контекст только той задачи. Порядок чередования здесь детерминирован (паузы `sleep(0)`), в реальном сервисе он будет другим, а `trace_id` останется верным. Теперь `grep req-A` собирает цепочку одного запроса. Для сервиса идентификатор берут из входящего заголовка `traceparent` стандарта W3C Trace Context, а при его отсутствии генерируют; это идея, без привязки к конкретному фреймворку. Чтобы `spawn` из предыдущего раздела тоже писал с `trace_id`, достаточно подключить тот же фильтр: `create_task` внутри `spawn` скопирует контекст вызвавшего.
+Строки двух запросов чередуются, но у каждой стоит свой `req-A` или `req-B`, включая записи из вложенной задачи: она унаследовала значение. В главной задаче после всего стоит `-`: `trace_id.set` внутри `handle_request` изменил контекст только той задачи. Порядок чередования здесь детерминирован (паузы `sleep(0)`), в реальном сервисе он будет другим, а `trace_id` останется верным. Теперь `grep req-A` собирает цепочку одного запроса. Для сервиса идентификатор берут из входящего заголовка `traceparent` стандарта W3C Trace Context, а при его отсутствии генерируют; это идея, без привязки к конкретному фреймворку. Чтобы `spawn` из предыдущего раздела тоже писал с `trace_id`, достаточно подключить тот же фильтр: `create_task` внутри `spawn` скопирует контекст вызвавшего. Копия делается в момент создания: задача, созданная до `trace_id.set(...)`, значения не увидит и будет писать `-`.
 
 ## Разбор результатов gather
 
@@ -608,14 +624,19 @@ log = logging.getLogger("app.gather")
 async def gather_checked(
     labels: Sequence[str], awaitables: Sequence[Awaitable[T]]
 ) -> tuple[list[tuple[str, T]], list[tuple[str, BaseException]]]:
-    """gather(return_exceptions=True) с разбором: успехи отдельно, ошибки отдельно и в лог."""
+    """gather(return_exceptions=True) с разбором: успехи отдельно, ошибки (и отменённые) отдельно.
+
+    Отмена самого gather снаружи бросает CancelledError из await ниже и сюда не попадает.
+    CancelledError в списке значит, что отменили дочернюю задачу: это данные, а не отмена вызывающего.
+    """
     results = await asyncio.gather(*awaitables, return_exceptions=True)
     ok: list[tuple[str, T]] = []
     failed: list[tuple[str, BaseException]] = []
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, asyncio.CancelledError):
-            raise result  # отмену не складываем в «ошибки»
-        if isinstance(result, BaseException):
+            log.warning("%s: дочерняя задача отменена", label)
+            failed.append((label, result))
+        elif isinstance(result, BaseException):
             log.error("%s: не удалось", label, exc_info=result)
             failed.append((label, result))
         else:
@@ -625,6 +646,8 @@ async def gather_checked(
 
 async def fetch(n: int) -> int:
     await asyncio.sleep(0)
+    if n == 2:
+        raise asyncio.CancelledError  # имитация: дочернюю задачу отменил кто-то другой
     if n % 2:
         raise ValueError(f"нечётный номер {n}")
     return n * 10
@@ -634,7 +657,7 @@ async def main() -> None:
     labels = [f"item-{n}" for n in range(4)]
     ok, failed = await gather_checked(labels, [fetch(n) for n in range(4)])
     print("успехи:", ok)
-    print("ошибки:", [(label, str(exc)) for label, exc in failed])
+    print("ошибки:", [(label, type(exc).__name__) for label, exc in failed])
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -644,19 +667,22 @@ asyncio.run(main())
 ```text title="Вывод"
 ERROR app.gather: item-1: не удалось
 Traceback (most recent call last):
-  File "gather_check.py", line 32, in fetch
+  File "gather_check.py", line 39, in fetch
     raise ValueError(f"нечётный номер {n}")
 ValueError: нечётный номер 1
+WARNING app.gather: item-2: дочерняя задача отменена
 ERROR app.gather: item-3: не удалось
 Traceback (most recent call last):
-  File "gather_check.py", line 32, in fetch
+  File "gather_check.py", line 39, in fetch
     raise ValueError(f"нечётный номер {n}")
 ValueError: нечётный номер 3
-успехи: [('item-0', 0), ('item-2', 20)]
-ошибки: [('item-1', 'нечётный номер 1'), ('item-3', 'нечётный номер 3')]
+успехи: [('item-0', 0)]
+ошибки: [('item-1', 'ValueError'), ('item-2', 'CancelledError'), ('item-3', 'ValueError')]
 ```
 
-Три решения в `gather_checked`. Результаты соотносятся с метками через `zip(..., strict=True)`: порядок результатов совпадает с порядком аргументов. Исключение логируется с `exc_info=result`, поэтому трейсбек остаётся: просто `log.error("%s", result)` оставил бы одну строку без причины (раздел «log.exception и exc_info» заметки [[Логирование]]). `CancelledError` не складывается в «ошибки»: её перевыбрасываем, иначе отмена снаружи превратится в обычный результат. Если какую-то ошибку нужно повторить, повторяйте только идемпотентные операции.
+Что делает `gather_checked`. Результаты соотносятся с метками через `zip(..., strict=True)`: порядок результатов совпадает с порядком аргументов. Каждая ошибка логируется с `exc_info=result`, поэтому трейсбек остаётся: просто `log.error("%s", result)` оставил бы одну строку без причины (раздел «log.exception и exc_info» заметки [[Логирование]]). Цикл не прерывается ни на одном элементе, так что в логе есть все ошибки, а в ответе все успехи.
+
+Отдельно про `CancelledError`. Если отменят саму задачу, которая ждёт `gather`, исключение вылетит из `await asyncio.gather(...)` и до цикла разбора не дойдёт: вызывающий и так увидит свою отмену, перехватывать её не нужно. А вот `CancelledError` внутри списка означает, что отменили дочернюю задачу (в модели её имитирует `raise asyncio.CancelledError` в `fetch`). Это данные: она логируется как предупреждение и попадает в «не удалось» вместе с остальными, чтобы не потерять другие результаты на полпути. Перевыбрасывать её из цикла означало бы объявить отменённым вызывающего, которого никто не отменял. Если какую-то ошибку нужно повторить, повторяйте только идемпотентные операции.
 
 ## ExceptionGroup и add_note
 
@@ -727,7 +753,7 @@ ERROR app.group: целиком:
 
 ## Лог, который не дошёл
 
-Логи из потока и процесса теряются по разным причинам. Из потока: исключение в потоке не попадает в `except` главного, его ловит только `threading.excepthook` ([[#Хуки процесса и потока]]), а логгеры потокобезопасны, так что строки доходят. Из процесса и контейнера: `print` и `sys.stdout` буферизуются, когда вывод не терминал (пайп, лог контейнера). Процесс, убитый без штатного завершения, уносит буфер с собой. Модель: дочерний процесс печатает строку и аварийно выходит, родитель читает пайп.
+Строка, которую программа «напечатала», может не дойти до лога, если процесс умер раньше, чем сбросился буфер. Виноват `print` (и вообще `sys.stdout`): когда вывод идёт не в терминал, а в пайп или файл (лог контейнера, перенаправление), он буферизуется блоками и ждёт сброса. Процесс, убитый без штатного завершения, уносит буфер с собой. `logging.StreamHandler` сбрасывает поток после каждой записи сам, поэтому записи через него теряются только если процесс упал до самого вызова логгера. Исключение в потоке сюда не относится: это отдельная потеря, её ловит `threading.excepthook` ([[#Хуки процесса и потока]]). Модель: дочерний процесс печатает строку и аварийно выходит, родитель читает пайп.
 
 ```python
 import subprocess
@@ -756,7 +782,7 @@ python (без флагов) stdout=''
 python -u           stdout='строка из дочернего процесса'
 ```
 
-Без флагов строка пропала: `stdout` в пайпе ждёт сброса буфера, которого не случилось. С `-u` (или переменной `PYTHONUNBUFFERED=1`, или `print(..., flush=True)`, или `logging.StreamHandler` с явным `flush`) строка дошла. В контейнере стоит включать `PYTHONUNBUFFERED=1`. Для логов из дочерних процессов собирайте записи в одну очередь (`logging.handlers.QueueHandler` и `QueueListener`) вместо записи в один файл из нескольких процессов. Если процесс завис и логов нет, смотрите стеки: `faulthandler.dump_traceback_later` и `asyncio.all_tasks()` описаны в разделе «Как искать зависания» страницы [[Выбор примитива синхронизации]].
+Без флагов строка пропала: `stdout` в пайпе ждёт сброса буфера, которого не случилось. С `-u` строка дошла. Лечение: `PYTHONUNBUFFERED=1` (в контейнере стоит включать его всегда), `python -u` или `print(..., flush=True)` для отдельных строк. Для логов из дочерних процессов собирайте записи в одну очередь (`logging.handlers.QueueHandler` и `QueueListener`) вместо записи в один файл из нескольких процессов. Если процесс завис и логов нет, смотрите стеки: `faulthandler.dump_traceback_later` и `asyncio.all_tasks()` описаны в разделе «Как искать зависания» страницы [[Выбор примитива синхронизации]].
 
 ## Что спросят дальше
 
