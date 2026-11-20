@@ -4,7 +4,7 @@ title: Структуры данных Redis
 
 Какая структура Redis подходит под какую задачу и чем платим за выбор: таблица лидеров, корзина, лента, уникальные посетители, подсчёт уникальных значений и активность по дням.
 Рядом: [[Redis]] · [[Кэширование в Redis]] · [[Очереди и события в Redis]] · [[Идемпотентность в Redis]] · [[Персистентность и память Redis]]
-Разделы: [[#Суть]] · [[#Таблица структур и задач]] · [[#Рецепт: таблица лидеров на sorted set]] · [[#Рецепт: корзина в hash]] · [[#Рецепт: лента последних N на list]] · [[#Рецепт: уникальные посетители, set против HyperLogLog]] · [[#Рецепт: активность по дням в bitmap]] · [[#Бизнес-кейс]] · [[#Что спросят дальше]]
+Разделы: [[#Суть]] · [[#Таблица структур и задач]] · [[#Как устроены структуры внутри: схема и модель в коде]] · [[#Рецепт: таблица лидеров на sorted set]] · [[#Рецепт: корзина в hash]] · [[#Рецепт: лента последних N на list]] · [[#Рецепт: уникальные посетители, set против HyperLogLog]] · [[#Рецепт: активность по дням в bitmap]] · [[#Бизнес-кейс]] · [[#Что спросят дальше]]
 
 Все примеры снимались на Redis 8 (сервер 8.10.3) и redis-py 8.1.0 в асинхронном режиме (`redis.asyncio`). Везде подразумевается соединение `r = redis.Redis(port=6390, decode_responses=True)`; `decode_responses=True` возвращает строки вместо байтов.
 
@@ -32,6 +32,174 @@ title: Структуры данных Redis
 - `INCR` атомарно увеличивает число в ключе на единицу; `HINCRBY` делает то же для поля хеша.
 - Consumer group — группа читателей потока: Redis раздаёт сообщения между ними, а читатель подтверждает обработку командой `XACK` (ack, acknowledge, «подтверждено»). Подробнее в [[Очереди и события в Redis]].
 - `LMOVE` атомарно перекладывает элемент из одного списка в другой, `BRPOP` ждёт элемент, если список пуст.
+
+## Как устроены структуры внутри: схема и модель в коде
+
+Ниже схемы и маленькие модели на Python: когда Redis держит коллекцию в компактном виде и когда переключается на обычный, и как устроен sorted set, раз он быстро отвечает и по имени элемента, и по диапазону счёта. Модели упрощены, и это сказано при каждой.
+
+### Компактная кодировка и пороги
+
+Маленькие hash, set и sorted set Redis хранит в `listpack`: один плотный кусок памяти, где элементы лежат подряд без указателей. Поиск в нём линейный, но на сотне элементов это быстрее и заметно дешевле по памяти, чем хеш-таблица. Как только коллекция выходит за порог по числу элементов или хоть один элемент длиннее порога в байтах, Redis один раз перекладывает её в «большое» представление: `hashtable` для hash и set, `skiplist` для sorted set. Обратно коллекция сама не сжимается, даже если элементы потом удалить.
+
+Пороги задают настройки `hash-max-listpack-entries` и `hash-max-listpack-value` (для sorted set — `zset-max-listpack-*`, для set — `set-max-listpack-*`, и ещё `set-max-intset-entries` для множества из одних целых). Значения по умолчанию (Redis 7.2 и новее, включая 8): 128 элементов и 64 байта; `set-max-listpack-*` появились в 7.2, до этого маленький set из строк сразу был `hashtable`. Фактическое представление показывает `OBJECT ENCODING` (пример с выводом в разделе «Компактные представления» ниже).
+
+```mermaid
+flowchart TB
+    a["малая коллекция:<br/>listpack"]
+    b["большая коллекция:<br/>hashtable (hash, set)<br/>skiplist + dict (zset)<br/>в listpack уже не возвращается"]
+    a -- "элементов больше 128" --> b
+    a -- "элемент длиннее 64 байт" --> b
+```
+
+```python
+# пороги по умолчанию Redis 7.2+: число элементов и длина элемента в байтах
+LIMITS = {"hash": (128, 64), "zset": (128, 64), "set": (128, 64)}
+
+
+def encoding(kind, items):
+    # items: для hash список пар (поле, значение), для zset и set список элементов
+    max_entries, max_value = LIMITS[kind]
+    big = {"hash": "hashtable", "zset": "skiplist", "set": "hashtable"}[kind]
+    if len(items) > max_entries:
+        return big
+    for item in items:
+        parts = item if kind == "hash" else [item]
+        for part in parts:
+            if len(str(part).encode()) > max_value:
+                return big
+    return "listpack"
+
+
+encoding("hash", [("a", 1)])                                  # 'listpack'
+encoding("hash", [(str(i), "x") for i in range(128)])         # 'listpack'
+encoding("hash", [(str(i), "x") for i in range(129)])         # 'hashtable'
+encoding("hash", [("a", "x" * 65)])                           # 'hashtable'
+encoding("zset", ["m1", "m2"])                                # 'listpack'
+encoding("zset", ["m" + str(i) for i in range(129)])          # 'skiplist'
+```
+
+Модель упрощена: у set есть ещё промежуточное представление `intset` для чисел, у list пороги задаются размером в байтах (`list-max-listpack-size`), а настоящий Redis сверяет порог и при добавлении, и при чтении настроек из конфига.
+
+### Sorted set: skiplist и словарь
+
+Большой sorted set состоит из двух структур над одними и теми же элементами. Словарь `член → счёт` отвечает на `ZSCORE` за O(1). Skiplist хранит пары `(счёт, член)` по порядку и отвечает на `ZRANGEBYSCORE`, `ZRANK` и вставку за O(log N). Пропускной список — это обычный отсортированный связный список, над которым надстроены «скоростные полосы»: у части узлов есть ссылки, которые перепрыгивают несколько соседей. Поиск идёт сверху вниз: на верхнем уровне шагаем вправо, пока следующий узел ещё меньше искомого, затем спускаемся на уровень ниже и повторяем.
+
+```mermaid
+flowchart LR
+    subgraph L4["уровень 4"]
+        direction LR
+        h4["h:80"]
+    end
+    subgraph L3["уровень 3"]
+        direction LR
+        d3["d:40"] --> h3["h:80"]
+    end
+    subgraph L2["уровень 2"]
+        direction LR
+        b2["b:20"] --> d2["d:40"] --> f2["f:60"] --> h2["h:80"]
+    end
+    subgraph L1["уровень 1 — все узлы"]
+        direction LR
+        a1["a:10"] --> b1["b:20"] --> c1["c:30"] --> d1["d:40"] --> e1["e:50"] --> f1["f:60"] --> g1["g:70"] --> h1["h:80"]
+    end
+```
+
+Высоту узла Redis выбирает случайно: каждый следующий уровень с вероятностью 1/4, максимум 32. В модели уровни заданы явно, поэтому результат повторяется. Упрощения: нет ссылки назад и счётчиков пролёта (`span`), по которым Redis считает `ZRANK` и `ZRANGE` по позиции, а равные счета упорядочиваются по имени члена, как и в Redis.
+
+```python
+class Skiplist:
+    def __init__(self, max_level=4):
+        self.max_level = max_level
+        self.head = {"score": None, "member": None, "next": [None] * max_level}
+        self.steps = 0                      # сколько раз шагнули вправо: мера работы
+
+    def less(self, node, score, member):    # узел стоит раньше пары (score, member)
+        return node["score"] < score or (node["score"] == score and node["member"] < member)
+
+    def path(self, score, member):
+        # сверху вниз: на каждом уровне идём вправо, пока следующий узел раньше искомого
+        update = [None] * self.max_level    # последний узел перед позицией на каждом уровне
+        node = self.head
+        for lvl in range(self.max_level - 1, -1, -1):
+            while node["next"][lvl] is not None and self.less(node["next"][lvl], score, member):
+                node = node["next"][lvl]
+                self.steps += 1
+            update[lvl] = node
+        return update
+
+    def insert(self, score, member, level):     # у Redis уровень случайный, у нас задан
+        update = self.path(score, member)
+        node = {"score": score, "member": member, "next": [None] * level}
+        for lvl in range(level):
+            node["next"][lvl] = update[lvl]["next"][lvl]
+            update[lvl]["next"][lvl] = node
+
+    def remove(self, score, member):
+        update = self.path(score, member)
+        node = update[0]["next"][0]
+        if node is not None and node["score"] == score and node["member"] == member:
+            for lvl in range(len(node["next"])):
+                update[lvl]["next"][lvl] = node["next"][lvl]
+
+    def range_by_score(self, low, high):
+        self.steps = 0
+        node = self.path(low, "")[0]["next"][0]  # первый узел со score >= low
+        found = []
+        while node is not None and node["score"] <= high:
+            found.append((node["member"], node["score"]))
+            node = node["next"][0]               # дальше по нижнему уровню
+            self.steps += 1
+        return found
+
+
+class SortedSet:
+    def __init__(self):
+        self.scores = {}                    # член -> счёт: ZSCORE за O(1)
+        self.skip = Skiplist()              # (счёт, член) по порядку: диапазоны
+
+    def zadd(self, member, score, level=1):
+        if member in self.scores:           # смена счёта: удалить старый узел и вставить новый
+            self.skip.remove(self.scores[member], member)
+        self.scores[member] = score
+        self.skip.insert(score, member, level)
+
+    def zscore(self, member):
+        return self.scores[member]
+
+    def zrangebyscore(self, low, high):
+        return self.skip.range_by_score(low, high)
+```
+
+Прогон: восемь членов с явными уровнями, как на схеме.
+
+```python
+z = SortedSet()
+for member, score, level in [("a", 10, 1), ("b", 20, 2), ("c", 30, 1), ("d", 40, 3),
+                             ("e", 50, 1), ("f", 60, 2), ("g", 70, 1), ("h", 80, 4)]:
+    z.zadd(member, score, level)
+
+z.zscore("f")                           # 60
+z.zrangebyscore(35, 65)                 # [('d', 40), ('e', 50), ('f', 60)]
+z.skip.steps                            # 5
+
+z.zadd("c", 75)                         # смена счёта: узел c уехал с 30 на 75
+z.zrangebyscore(70, 80)                 # [('g', 70), ('c', 75), ('h', 80)]
+```
+
+`ZRANGEBYSCORE 35 65` сначала спускается по уровням до первого узла со счётом не меньше 35 (два шага вправо: `b`, затем `c` на нижнем уровне), потом идёт по нижнему уровню и собирает `d`, `e`, `f` (три шага): всего 5. `ZADD` для существующего члена не создаёт дубль: словарь находит старый счёт, skiplist удаляет старый узел и вставляет новый. Выигрыш от уровней виден на большом наборе: 64 члена, у каждого второго уровень 2, у каждого четвёртого 3, у каждого восьмого 4.
+
+```python
+big = SortedSet()
+for i in range(1, 65):
+    level = 1 + (i % 2 == 0) + (i % 4 == 0) + (i % 8 == 0)
+    big.zadd("m" + str(i), i * 10, level)
+
+big.skip.steps = 0
+big.skip.path(600, "")                  # спуск до первого счёта >= 600
+big.skip.steps                          # 9
+```
+
+Девять шагов вместо 59 при обходе списка подряд. Так ядро sorted set и держит и точечные ответы, и диапазоны (таблица лидеров ниже), а вставка идёт за те же O(log N). В маленьком sorted set (до 128 элементов) всего этого нет: он лежит в `listpack` отсортированным массивом, и поиск там линейный.
 
 ## Рецепт: таблица лидеров на sorted set
 
