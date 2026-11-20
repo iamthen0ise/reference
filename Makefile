@@ -1,4 +1,4 @@
-.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-down sql-test
+.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-psql sql-down sql-test
 
 PREVIEW_PORT ?= 4329
 PLAYWRIGHT_INSTALL_FLAGS ?=
@@ -42,6 +42,9 @@ sql-run:
 
 sql-block:
 	bash .site/scripts/sql-pg.sh block "$(PAGE)" "$(TITLE)"
+
+sql-psql:
+	docker exec -it reference-pg psql -U postgres -d library
 
 sql-down:
 	bash .site/scripts/sql-pg.sh down
