@@ -97,16 +97,16 @@ free -m
 ```text title="Вывод"
 == файл записан в обход кэша ==
                total        used        free      shared  buff/cache   available
-Mem:            7935         784        6832          14         496        7150
-Swap:           1023         109         914
+Mem:            7935         725        6812           1         564        7210
+Swap:           1023          90         933
 == файл прочитан один раз ==
                total        used        free      shared  buff/cache   available
-Mem:            7935         786        6430          14         896        7149
-Swap:           1023         109         914
+Mem:            7935         726        6410           1         964        7208
+Swap:           1023          90         933
 == файл удалён ==
                total        used        free      shared  buff/cache   available
-Mem:            7935         792        6824          14         496        7142
-Swap:           1023         109         914
+Mem:            7935         724        6812           1         564        7211
+Swap:           1023          90         933
 ```
 
 PID и объёмы у вас будут другими, как и исходное состояние кэша: цифры описывают ВМ Docker Desktop, а не вашу машину. Сравнивать нужно строки между собой: `free` после чтения меньше на ~400, `buff/cache` больше на ~400, `available` на месте. После `rm` кэш вернулся к исходному.
@@ -135,9 +135,9 @@ echo "после sync: $(show)"
 ```
 
 ```text title="Вывод"
-до записи:  Dirty: 568 kB Writeback: 0 kB
-после dd:   Dirty: 307768 kB Writeback: 0 kB
-после sync: Dirty: 4 kB Writeback: 0 kB
+до записи:  Dirty: 60 kB Writeback: 0 kB
+после dd:   Dirty: 307260 kB Writeback: 0 kB
+после sync: Dirty: 0 kB Writeback: 0 kB
 ```
 
 Объёмы у вас будут другими, и ядро могло начать запись само до вызова `sync`. `dd` без `oflag=direct` вернулся, когда данные были в памяти, а на диск ещё не ушли: `Dirty` вырос на ~300 МБ. `sync` довёл их до диска, `Dirty` вернулся к нулю.
@@ -152,7 +152,7 @@ grep -E '^Swap(Total|Free):' /proc/meminfo
 ```text title="Вывод"
 vm.swappiness = 60
 SwapTotal:       1048572 kB
-SwapFree:         936892 kB
+SwapFree:         955396 kB
 ```
 
 Объёмы у вас будут другими, это swap ВМ Docker Desktop.
@@ -170,14 +170,18 @@ SwapFree:         936892 kB
 
 Здесь cgroup нужна только как средство изоляции демонстрации: механику `memory.max`, `memory.high` и иерархию разбирает страница про контейнеры. Нужные шаги для блоков с cgroup:
 
-1. В cgroup пространстве имён песочницы уже лежат процессы. По правилу «no internal process constraint» из документации cgroup v2 контроллер `memory` нельзя включить для дочерних cgroup там, где у родителя есть собственные процессы, и запись `+memory` в `cgroup.subtree_control` в этой песочнице заканчивается `Device or resource busy`. Поэтому блок переносит все процессы в соседнюю cgroup `box`.
+1. В cgroup пространстве имён песочницы уже лежат процессы. По правилу «no internal process constraint» из документации cgroup v2 контроллер `memory` нельзя включить для дочерних cgroup там, где у родителя есть собственные процессы, и запись `+memory` в `cgroup.subtree_control` в этой песочнице заканчивается `Device or resource busy`. Для настоящего корня cgroup на хосте это правило не действует (cgroup v2), но корень пространства имён cgroup в контейнере — обычная cgroup на хосте, а не настоящий корень, поэтому правило здесь работает. Поэтому блок переносит все процессы в соседнюю cgroup `box`.
 2. Включает `memory` для дочерних cgroup и создаёт вложенную cgroup с `memory.max`.
-3. По выходу (`trap`, в том числе при ошибке) удаляет вложенную cgroup, выключает `memory` и возвращает процессы на место.
+3. По выходу (`trap`, в том числе при ошибке) убивает процессы вложенной cgroup (`cgroup.kill`), ждёт, пока она опустеет, удаляет её, выключает `memory` и возвращает процессы на место.
 
 ```sh title="free-cgroup.sh"
 root=/sys/fs/cgroup
 cleanup() {
-  rmdir "$root/demo-free" 2>/dev/null
+  if [ -d "$root/demo-free" ]; then
+    echo 1 > "$root/demo-free/cgroup.kill"
+    for _ in $(seq 50); do [ -s "$root/demo-free/cgroup.procs" ] || break; sleep 0.1; done
+    rmdir "$root/demo-free"
+  fi
   echo -memory > "$root/cgroup.subtree_control" 2>/dev/null
   for p in $(cat "$root/box/cgroup.procs" 2>/dev/null); do
     echo "$p" > "$root/cgroup.procs" 2>/dev/null
@@ -202,8 +206,8 @@ grep MemTotal /proc/meminfo'
 ```text title="Вывод"
 cgroup: 0::/demo-free
                total        used        free      shared  buff/cache   available
-Mem:            7935         762        6853          16         500        7172
-Swap:           1023         109         914
+Mem:            7935         699        6837           1         564        7235
+Swap:           1023          90         933
 memory.max: 104857600
 MemTotal:        8125932 kB
 ```
@@ -266,9 +270,9 @@ print(f"VmRSS после записи в один байт: {vm('VmRSS'):.3f} Г
 ```text title="Вывод"
 vm.overcommit_memory = 1
 MemTotal ВМ:      7.7 ГиБ
-Committed_AS:     1.6 ГиБ до mmap
+Committed_AS:     1.3 ГиБ до mmap
 mmap 64 ГиБ: успех
-Committed_AS:    65.6 ГиБ после mmap
+Committed_AS:    65.3 ГиБ после mmap
 VmSize:          64.0 ГиБ
 VmRSS:          0.007 ГиБ
 VmRSS после записи в один байт: 0.007 ГиБ
@@ -286,9 +290,9 @@ Overcommit откладывает проблему, а не снимает её:
 
 ## OOM killer
 
-Когда памяти не хватает и ядро не может её освободить (кэш выброшен, swap кончился или ограничен), оно вызывает OOM killer: тот выбирает процесс и убивает его сигналом `KILL`. Поэтому процесс не может это перехватить, а код выхода равен 137 (см. [[Сигналы в Linux#Коды выхода 128 + N]]).
+Когда памяти не хватает и ядро не может её освободить (кэш выброшен, swap кончился или ограничен), оно вызывает OOM killer: тот выбирает процесс и посылает ему `KILL` (так сделано в исходниках ядра, `mm/oom_kill.c`). `KILL` перехватить нельзя (man signal(7)), поэтому у процесса нет шанса среагировать, а код выхода равен 137 (см. [[Сигналы в Linux#Коды выхода 128 + N]]).
 
-Выбор жертвы строится на оценке `oom_score` (man proc_pid_oom_score(5)): чем она выше, тем вероятнее выбор; основа оценки — объём памяти процесса. К ней добавляется `oom_score_adj`, от -1000 до +1000 (man proc_pid_oom_score_adj(5)): -1000 равносилен отключению OOM-убийства для процесса, положительные значения делают его жертвой охотнее. OOM может быть общесистемным или внутри cgroup, когда достигнут её `memory.max`: тогда жертва выбирается только внутри этой cgroup, а в `memory.events` растут счётчики `max`, `oom` и `oom_kill` (документация cgroup v2).
+Выбор жертвы строится на оценке `oom_score` (man proc_pid_oom_score(5)): чем она выше, тем вероятнее выбор; основа оценки — объём памяти процесса. К ней добавляется `oom_score_adj` (его значение прибавляется к оценке), от -1000 до +1000 (man proc_pid_oom_score_adj(5)): -1000 равносилен отключению OOM-убийства для процесса, положительные значения делают его жертвой охотнее. OOM может быть общесистемным или внутри cgroup, когда достигнут её `memory.max`: тогда жертва выбирается только внутри этой cgroup, а в `memory.events` растут счётчики `max`, `oom` и `oom_kill` (документация cgroup v2).
 
 Прогон ниже — в cgroup с `memory.max` в 100 МБ и `memory.swap.max` равным 0: без второго swap ВМ мог бы поглотить часть нагрузки, и срабатывание отложилось бы. Процесс выделяет по 10 МиБ и пишет в каждый кусок, пока его не убьют.
 
@@ -296,7 +300,11 @@ Overcommit откладывает проблему, а не снимает её:
 root=/sys/fs/cgroup
 cg=$root/demo-oom
 cleanup() {
-  rmdir "$cg" 2>/dev/null
+  if [ -d "$cg" ]; then
+    echo 1 > "$cg/cgroup.kill"
+    for _ in $(seq 50); do [ -s "$cg/cgroup.procs" ] || break; sleep 0.1; done
+    rmdir "$cg"
+  fi
   echo -memory > "$root/cgroup.subtree_control" 2>/dev/null
   for p in $(cat "$root/box/cgroup.procs" 2>/dev/null); do
     echo "$p" > "$root/cgroup.procs" 2>/dev/null
@@ -330,7 +338,7 @@ echo "код выхода: $?"
 echo "== memory.events =="
 cat "$cg/memory.events"
 echo "== dmesg =="
-dmesg | grep -iE 'oom-kill|out of memory' | tail -n 3 | cut -c1-90
+dmesg | grep -iE 'oom-kill|out of memory' | tail -n 3 | cut -c1-89 | sed 's/$/…/'
 ```
 
 ```text title="Вывод"
@@ -353,20 +361,24 @@ oom 1
 oom_kill 1
 oom_group_kill 0
 == dmesg ==
-[134372.842785] python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score
-[134372.842852] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=cde739fb4034dd
-[134372.842873] Memory cgroup out of memory: Killed process 81048 (python3) total-vm:11570
+[134975.834337] python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_scor…
+[134975.834413] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=131dfb6dde03e…
+[134975.834440] Memory cgroup out of memory: Killed process 87876 (python3) total-vm:1157…
 ```
 
-PID и объёмы у вас будут другими. Процесс добрался примерно до 80 МиБ и был убит: код выхода 137 (128 + 9), в `memory.events` `oom_kill` равен 1, а `max` показывает, сколько раз использование упиралось в предел и ядро пыталось освободить память. В `dmesg` видна строка `invoked oom-killer`, строка `oom-kill:constraint=CONSTRAINT_MEMCG` (OOM вызван лимитом cgroup, а не нехваткой памяти ВМ) и `Memory cgroup out of memory: Killed process …`. PID в `dmesg` из пространства имён ВМ, поэтому он не совпадает с PID внутри контейнера. Не забудьте, что `dmesg` общий для всей ВМ: в нём могут быть старые записи, поэтому берутся последние. Значение `oom_score` у процесса в этой ВМ — 666 при нулевой `oom_score_adj`. Абсолютные числа здесь не совпадают с описанием в man (там диапазон до 1000), поэтому полагаться стоит только на сравнение оценок разных процессов.
+PID и объёмы у вас будут другими. Процесс добрался примерно до 80 МиБ и был убит: код выхода 137 (128 + 9), в `memory.events` `oom_kill` равен 1, а `max` показывает, сколько раз использование упиралось в предел и ядро пыталось освободить память. В `dmesg` видна строка `invoked oom-killer`, строка `oom-kill:constraint=CONSTRAINT_MEMCG` (OOM вызван лимитом cgroup, а не нехваткой памяти ВМ) и `Memory cgroup out of memory: Killed process …`. PID в этой строке ядро печатает в глобальном пространстве имён (`task_pid_nr` в `mm/oom_kill.c`), поэтому он не совпадает с PID внутри контейнера. Не забудьте, что `dmesg` общий для всей ВМ: в нём могут быть старые записи, поэтому берутся последние. Значение `oom_score` у процесса — 666 при нулевой `oom_score_adj`, хотя он занимает почти ничего. Это не ошибка: файл `/proc/<pid>/oom_score` показывает оценку, пересчитанную в диапазон от 0 до 2000, а потом умноженную на 2/3 (`proc_oom_score` в `fs/proc/base.c`): `(1000 + badness * 1000 / totalpages) * 2 / 3`. Без памяти и при `oom_score_adj` 0 это `1000 * 2 / 3`, то есть около 666, а при `oom_score_adj` 1000 около 1333 и чуть больше. Поэтому абсолютное число в `oom_score` читать как долю памяти нельзя, сравнивают оценки разных процессов между собой.
 
-Теперь выбор жертвы. В той же cgroup работают два процесса: `keeper` держит 40 МиБ, но у него `oom_score_adj` равен 1000; `hog` берёт 70 МиБ с `oom_score_adj` равным 0. Вместе они не помещаются в 100 МиБ. Ядро убивает не того, кто больше занимает или кто попросил последним, а того, у кого выше оценка.
+Теперь выбор жертвы. В cgroup работают два процесса: `keeper` держит 40 МиБ, но у него `oom_score_adj` равен 1000; `hog` держит 55 МиБ с `oom_score_adj` равным 0. Лимит сначала 200 МиБ, и оба спокойно помещаются, а когда оба загружены, блок опускает `memory.max` до 80 МиБ: тогда сумма не помещается. Так момент срабатывания не зависит от скорости, с которой процессы выделяют память. Кого убило, видно по строкам `Killed process` в `dmesg` (только свежие, по времени запуска блока).
 
 ```sh title="oom-victim.sh"
 root=/sys/fs/cgroup
 cg=$root/demo-victim
 cleanup() {
-  rmdir "$cg" 2>/dev/null
+  if [ -d "$cg" ]; then
+    echo 1 > "$cg/cgroup.kill"
+    for _ in $(seq 50); do [ -s "$cg/cgroup.procs" ] || break; sleep 0.1; done
+    rmdir "$cg"
+  fi
   echo -memory > "$root/cgroup.subtree_control" 2>/dev/null
   for p in $(cat "$root/box/cgroup.procs" 2>/dev/null); do
     echo "$p" > "$root/cgroup.procs" 2>/dev/null
@@ -381,7 +393,7 @@ for p in $(cat "$root/cgroup.procs"); do
 done
 echo +memory > "$root/cgroup.subtree_control"
 mkdir "$cg"
-echo 100M > "$cg/memory.max"
+echo 200M > "$cg/memory.max"
 echo 0 > "$cg/memory.swap.max"
 cat > /tmp/worker.py <<'PY'
 import os
@@ -393,39 +405,40 @@ open("/sys/fs/cgroup/demo-victim/cgroup.procs", "w").write(str(os.getpid()))
 open("/proc/self/oom_score_adj", "w").write(adj)
 chunks = []
 for _ in range(mib // 10):
-    chunks.append(bytearray(b"x" * (10 * 1024 * 1024)))
+    chunk = bytearray(10 * 1024 * 1024)
+    chunk[::4096] = b"x" * len(range(0, len(chunk), 4096))
+    chunks.append(chunk)
     time.sleep(step / 1000)
 score = open("/proc/self/oom_score").read().strip()
 print(f"{name}: oom_score_adj={adj}, score={score}, держит {mib} МиБ")
 time.sleep(30)
 PY
+start=$(cut -d" " -f1 /proc/uptime)
 python3 -u /tmp/worker.py keeper 1000 40 0 &
-keeper=$!
 disown
-sleep 1
-python3 -u /tmp/worker.py hog 0 70 100 &
-hog=$!
+python3 -u /tmp/worker.py hog 0 55 100 &
 disown
 sleep 3
-for pair in "keeper:$keeper" "hog:$hog"; do
-  if kill -0 "${pair#*:}" 2>/dev/null; then
-    echo "${pair%%:*}: жив"
-  else
-    echo "${pair%%:*}: убит"
-  fi
-done
-kill "$hog" 2>/dev/null
-grep -E '^oom_kill ' "$cg/memory.events"
+echo "== memory.max: 200M -> 80M =="
+echo 80M > "$cg/memory.max"
+sleep 1
+echo "== убитые процессы по порядку =="
+dmesg |
+  awk -v t="$start" '{ts = $1; gsub(/[][]/, "", ts); if (ts + 0 >= t) print}' |
+  grep 'Killed process' |
+  sed -E 's/.*\((\w+)\) .*(anon-rss:[0-9]+kB).*(oom_score_adj:.*)/\1 \2 \3/'
 ```
 
 ```text title="Вывод"
-keeper: oom_score_adj=1000, score=1337, держит 40 МиБ
-keeper: убит
-hog: убит
-oom_kill 2
+keeper: oom_score_adj=1000, score=1336, держит 40 МиБ
+hog: oom_score_adj=0, score=670, держит 55 МиБ
+== memory.max: 200M -> 80M ==
+== убитые процессы по порядку ==
+python3 anon-rss:43612kB oom_score_adj:1000
+python3 anon-rss:53864kB oom_score_adj:0
 ```
 
-PID и объёмы у вас будут другими. `keeper` убит, хотя занимал меньше (40 МиБ против 70): его `oom_score_adj` в 1000 сделал оценку выше. `hog` остался жив, а `oom_kill` равен 1: убийство одного процесса освободило достаточно памяти. Блок остановил `hog` сам и удалил cgroup.
+PID и объёмы у вас будут другими. Первой убита запись с `oom_score_adj:1000`, то есть `keeper`, хотя он занимал меньше (около 43 МБ против 54 МБ у `hog`): его `oom_score_adj` сделал оценку выше. Так это выглядело во всех прогонах. Второй записью ядро убило и `hog`, почему так, я не разбирал: вывод показывает только порядок убийств, а не то, что `hog` пришлось бы убить. Блок убрал cgroup вместе с остатками процессов (`cgroup.kill`).
 
 На практике: `oom_score_adj` = -1000 для важного процесса (например, базы данных) защищает его, но при нехватке памяти убивать придётся другие процессы. Это не лечение: чинят причину (утечку, лимит, размер буферов), а не отключают OOM killer.
 
