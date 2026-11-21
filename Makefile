@@ -60,6 +60,7 @@ linux-up:
 	bash .site/scripts/linux-box.sh up
 
 linux-block:
+	@test -n "$(PAGE)" -a -n "$(TITLE)" || { echo "usage: make linux-block PAGE=\"Linux/<page>.md\" TITLE=\"<name>\"" >&2; exit 2; }
 	bash .site/scripts/linux-box.sh block "$(PAGE)" "$(TITLE)"
 
 linux-shell:

@@ -60,8 +60,8 @@ cmd_block() {
   local f="/tmp/linux-box-block.$$.$RANDOM" rc=0
   printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' _ "$f"
   case "$lang" in
-    sh) docker exec -i -w /root "$container" timeout "$limit" bash "$f" </dev/null || rc=$? ;;
-    python) docker exec -i -w /root "$container" timeout "$limit" python3 -u "$f" </dev/null || rc=$? ;;
+    sh) docker exec -i -w /root "$container" timeout -k 5 "$limit" bash "$f" </dev/null || rc=$? ;;
+    python) docker exec -i -w /root "$container" timeout -k 5 "$limit" python3 -u "$f" </dev/null || rc=$? ;;
     *) echo "unknown language: $lang" >&2; rc=1 ;;
   esac
   docker exec "$container" rm -f "$f" >/dev/null 2>&1 || true
