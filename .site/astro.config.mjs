@@ -126,7 +126,7 @@ const sidebar = [
       },
     ],
   },
-  { label: 'Linux', items: pages('Linux', ['Процессы в Linux', 'Сигналы в Linux', 'Память в Linux', 'Файлы и дескрипторы', 'Ввод-вывод и сеть', 'Контейнеры изнутри']) },
+  { label: 'Linux', items: pages('Linux', ['Linux', 'Процессы в Linux', 'Сигналы в Linux', 'Память в Linux', 'Файлы и дескрипторы', 'Ввод-вывод и сеть', 'Контейнеры изнутри']) },
 ];
 
 export default defineConfig({
