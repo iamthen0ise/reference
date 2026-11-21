@@ -53,13 +53,18 @@ cmd_block() {
   code="$(extract_block "$page" "$title")" || exit 1
   is_running || { echo "not running: $container; run make linux-up" >&2; exit 1; }
   lang="${code%%$'\n'*}"
-  code="${code#*$'\n'}"
-  local rc=0
+  local body=""
+  case "$code" in *$'\n'*) body="${code#*$'\n'}" ;; esac
+  # Тело — во временный файл в контейнере: stdin блока свободен (/dev/null), команда,
+  # читающая stdin, не съест остаток скрипта.
+  local f="/tmp/linux-box-block.$$.$RANDOM" rc=0
+  printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' _ "$f"
   case "$lang" in
-    sh) printf '%s\n' "$code" | docker exec -i -w /root "$container" timeout "$limit" bash -s || rc=$? ;;
-    python) printf '%s\n' "$code" | docker exec -i -w /root "$container" timeout "$limit" python3 -u - || rc=$? ;;
-    *) echo "unknown language: $lang" >&2; exit 1 ;;
+    sh) docker exec -i -w /root "$container" timeout "$limit" bash "$f" </dev/null || rc=$? ;;
+    python) docker exec -i -w /root "$container" timeout "$limit" python3 -u "$f" </dev/null || rc=$? ;;
+    *) echo "unknown language: $lang" >&2; rc=1 ;;
   esac
+  docker exec "$container" rm -f "$f" >/dev/null 2>&1 || true
   if [ "$rc" -eq 124 ]; then echo "block timed out: $title" >&2; fi
   exit "$rc"
 }

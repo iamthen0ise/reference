@@ -51,6 +51,17 @@ ${fence}
 ${fence}sh title="sleep.sh"
 sleep 10
 ${fence}
+
+${fence}sh title="stdin.sh"
+cat
+echo after
+${fence}
+
+${fence}sh title="empty.sh"
+${fence}
+
+${fence}python title="empty.py"
+${fence}
 MD
 sed 's/$/\r/' "$tmp/page.md" > "$tmp/crlf.md"
 
@@ -92,6 +103,14 @@ if [ "$rc" -eq 124 ] && grep -q 'block timed out' "$tmp/err"; then ok timeout; e
 
 run crlf "$tmp/crlf.md" one.sh
 if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "$(printf 'hi\n0')" ]; then ok crlf; else bad crlf; fi
+
+run stdin-safe "$tmp/page.md" stdin.sh
+if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "after" ]; then ok stdin-safe; else bad stdin-safe; fi
+
+run empty-block "$tmp/page.md" empty.sh
+rc1=$rc; e1="$(cat "$tmp/out" "$tmp/err")"
+run empty-block "$tmp/page.md" empty.py
+if [ "$rc1" -eq 0 ] && [ "$rc" -eq 0 ] && [ -z "$e1$(cat "$tmp/out" "$tmp/err")" ]; then ok empty-block; else bad empty-block; fi
 
 bash "$script" down >/dev/null 2>&1; r1=$?
 bash "$script" down >/dev/null 2>&1; r2=$?
