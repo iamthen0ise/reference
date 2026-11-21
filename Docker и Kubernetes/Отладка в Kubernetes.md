@@ -48,7 +48,7 @@ kubectl get events -n <ns> --sort-by=.lastTimestamp
 
 Контейнер стартует и сразу падает; kubelet перезапускает его (по умолчанию политика `restartPolicy: Always`) с растущей задержкой. Состояние `CrashLoopBackOff` как раз означает, что задержка перед перезапуском сейчас действует, а не что с контейнером что-то случилось само: документация описывает его как работу экспоненциальной задержки перезапусков, которая сбрасывается, если контейнер проработал достаточно долго (в документации пример — 10 минут).
 
-Опыт: под с `CRASH_ON_START=1`. Блок ждёт `RESTARTS` не меньше 2 и состояния `CrashLoopBackOff` (с пределом 180 секунд), затем читает порядок: `get`, `describe`, `logs --previous`, события.
+Опыт: под с `CRASH_ON_START=1`. Блок ждёт `RESTARTS` не меньше 2 при статусе `Error` (предел 60 секунд), снимает `get` и `describe`, затем ждёт, пока `logs --previous` вернёт лог (предел 260 секунд), и читает события. Оба ожидания с выходом по таймауту. Почему не ждать статуса `CrashLoopBackOff`, объяснено под выводом.
 
 ```sh title="crashloop.sh"
 kubectl delete namespace demo-crash --ignore-not-found --wait --timeout=120s
@@ -67,17 +67,26 @@ spec:
         - {name: CRASH_ON_START, value: "1"}
 YAML
 short() { awk '{ if (length($0) > 90) print substr($0, 1, 89) "…"; else print }'; }
-for _ in $(seq 90); do
-  r="$(kubectl get pod crasher -n demo-crash -o jsonpath='{.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].state.waiting.reason}')"
-  [ "${r%% *}" -ge 2 ] 2>/dev/null && [ "${r#* }" = CrashLoopBackOff ] && break
-  sleep 2
+ok=""
+for _ in $(seq 60); do
+  read -r st rs < <(kubectl get pod crasher -n demo-crash --no-headers | awk '{ print $3, $4 }')
+  [ "$st" = Error ] && [ "${rs:-0}" -ge 2 ] 2>/dev/null && { ok=1; break; }
+  sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: no RESTARTS >= 2 in status Error" >&2; exit 1; }
 echo "--- 1. get pods"
 kubectl get pods -n demo-crash
 echo "--- 2. describe: Last State"
 kubectl describe pod crasher -n demo-crash | grep -A3 'Last State'
+ok=""
+for _ in $(seq 130); do
+  log="$(kubectl logs crasher -n demo-crash --previous 2>/dev/null)" &&
+    [ -n "$log" ] && [ "${log#unable to retrieve}" = "$log" ] && { ok=1; break; }
+  sleep 2
+done
+[ -n "$ok" ] || { echo "timeout: no previous log" >&2; exit 1; }
 echo "--- 3. logs --previous"
-kubectl logs crasher -n demo-crash --previous
+echo "$log"
 echo "--- 4. events"
 kubectl get events -n demo-crash --sort-by=.lastTimestamp \
   -o custom-columns='TYPE:.type,REASON:.reason,MESSAGE:.message' | short
@@ -88,13 +97,13 @@ kubectl delete namespace demo-crash --wait --timeout=120s
 namespace/demo-crash created
 pod/crasher created
 --- 1. get pods
-NAME      READY   STATUS             RESTARTS      AGE
-crasher   0/1     CrashLoopBackOff   4 (66s ago)   2m36s
+NAME      READY   STATUS   RESTARTS      AGE
+crasher   0/1     Error    2 (14s ago)   15s
 --- 2. describe: Last State
     Last State:     Terminated
       Reason:       Error
       Exit Code:    1
-      Started:      Sat, 21 Nov 2026 15:24:15 +0300
+      Started:      Sat, 21 Nov 2026 16:01:42 +0300
 --- 3. logs --previous
 fatal: CRASH_ON_START=1
 --- 4. events
@@ -107,7 +116,7 @@ Warning   BackOff     Back-off restarting failed container app in pod crasher_de
 namespace "demo-crash" deleted
 ```
 
-Признаки сценария: `STATUS` — `CrashLoopBackOff`, `RESTARTS` растёт (в скобках — как давно был последний перезапуск), `Last State: Terminated` с кодом выхода 1 (приложение само вышло с ошибкой, `Reason: Error`), в событиях `Warning BackOff` с текстом `Back-off restarting failed container`, а причину называет `logs --previous`: `fatal: CRASH_ON_START=1`. События `Pulled`, `Created`, `Started` на каждой попытке повторяются: `kubectl` склеивает такие повторы в одну строку со счётчиком.
+Признаки сценария: `RESTARTS` растёт (в скобках — как давно был последний перезапуск), `Last State: Terminated` с кодом выхода 1 (приложение само вышло с ошибкой, `Reason: Error`), в событиях `Warning BackOff` с текстом `Back-off restarting failed container`, а причину называет `logs --previous`: `fatal: CRASH_ON_START=1`. Статус в колонке `STATUS` документация называет `CrashLoopBackOff`; в песочнице (Kubernetes v1.37.0) он наблюдался иначе: пока контейнер упавший между попытками, `STATUS` показывает `Error` (так и в выводе выше), а `CrashLoopBackOff` в отдельном наблюдении появился только через четыре минуты, после пяти перезапусков (интервалы между перезапусками там были около 13, 23, 46, 83 секунд). Поэтому узнают сценарий не по одному слову в `STATUS`, а по росту `RESTARTS`, `Last State` и событию `BackOff`. Похожая особенность — с `--previous`: в тех же наблюдениях он больше полутора минут отвечал `unable to retrieve container logs`, пока текущий лог читался обычным `kubectl logs`, поэтому блок повторяет попытки. На своём кластере поведение может отличаться. События `Pulled`, `Created`, `Started` на каждой попытке повторяются: одинаковые события сворачиваются в одно со счётчиком `count`.
 
 Причина лежит в приложении или его настройке: ошибка конфигурации, недоступная зависимость при старте, неверная команда. Лечение — исправить причину и выкатить заново, а не перезапускать под.
 
@@ -142,11 +151,13 @@ spec:
         requests: {memory: 100Mi}
         limits: {memory: 100Mi}
 YAML
+ok=""
 for _ in $(seq 60); do
   r="$(kubectl get pod hungry -n demo-oom -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}')"
-  [ "$r" = OOMKilled ] && break
+  [ "$r" = OOMKilled ] && { ok=1; break; }
   sleep 2
 done
+[ -n "$ok" ] || { echo "timeout: no OOMKilled in Last State" >&2; exit 1; }
 echo "--- describe: Last State"
 kubectl describe pod hungry -n demo-oom | grep -A3 'Last State'
 echo "--- limit"
@@ -161,7 +172,7 @@ pod/hungry created
     Last State:     Terminated
       Reason:       OOMKilled
       Exit Code:    137
-      Started:      Sat, 21 Nov 2026 15:25:33 +0300
+      Started:      Sat, 21 Nov 2026 16:04:34 +0300
 --- limit
 {"memory":"100Mi"}
 namespace "demo-oom" deleted
@@ -200,10 +211,12 @@ spec:
         requests: {memory: 64Gi}
 YAML
 short() { awk '{ if (length($0) > 90) print substr($0, 1, 89) "…"; else print }'; }
+ok=""
 for _ in $(seq 30); do
-  kubectl get events -n demo-pending --field-selector reason=FailedScheduling -o name | grep -q . && break
+  kubectl get events -n demo-pending --field-selector reason=FailedScheduling -o name | grep -q . && { ok=1; break; }
   sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: no FailedScheduling event" >&2; exit 1; }
 echo "--- get pods"
 kubectl get pods -n demo-pending
 echo "--- events"
@@ -235,7 +248,7 @@ namespace "demo-pending" deleted
 ### Частые ошибки в ответе
 
 - «Под запустится сам, когда освободится место». Если запрос больше свободного на любом узле, ничего не освободится; запрос надо уменьшить или кластер расширить.
-- «`Pending` — значит, образ скачивается». Скачивание идёт уже после размещения на узел, в состоянии `ContainerCreating`; `Pending` с `FailedScheduling` — до узла.
+- «`Pending` с `FailedScheduling` — значит, образ скачивается». `FailedScheduling` значит, что под не размещён ни на один узел; скачивание образа начинается только после размещения (в колонке `STATUS` оно видно как `ContainerCreating`, хотя фаза пода всё ещё `Pending`).
 - «Подниму `limits`». Планировщик смотрит на `requests`, лимиты на размещение не влияют.
 
 ## ImagePullBackOff
@@ -260,12 +273,14 @@ spec:
 YAML
 short() { awk '{ if (length($0) > 90) print substr($0, 1, 89) "…"; else print }'; }
 last=""
+ok=""
 for _ in $(seq 60); do
   s="$(kubectl get pod nope -n demo-image -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}')"
   [ "$s" != "$last" ] && echo "status: $s" && last="$s"
-  [ "$s" = ImagePullBackOff ] && break
+  [ "$s" = ImagePullBackOff ] && { ok=1; break; }
   sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: no ImagePullBackOff" >&2; exit 1; }
 echo "--- get pods"
 kubectl get pods -n demo-image
 echo "--- events"
@@ -282,7 +297,7 @@ status: ErrImagePull
 status: ImagePullBackOff
 --- get pods
 NAME   READY   STATUS             RESTARTS   AGE
-nope   0/1     ImagePullBackOff   0          19s
+nope   0/1     ImagePullBackOff   0          18s
 --- events
 TYPE      REASON      MESSAGE
 Normal    Scheduled   Successfully assigned demo-image/nope to reference-control-plane
@@ -337,11 +352,13 @@ spec:
     - port: 80
       targetPort: 8080
 YAML
+ok=""
 for _ in $(seq 30); do
   kubectl get events -n demo-notready --field-selector reason=Unhealthy \
-    -o custom-columns='MESSAGE:.message' | grep -q 'statuscode: 503' && break
+    -o custom-columns='MESSAGE:.message' | grep -q 'statuscode: 503' && { ok=1; break; }
   sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: no readiness probe failure with 503" >&2; exit 1; }
 echo "--- get pods"
 kubectl get pods -n demo-notready
 echo "--- phase and Ready condition"

@@ -164,7 +164,7 @@ namespace "demo-svc" deleted
 
 Вторая — под останавливается без паузы. Адрес пода убирают из раздачи, и параллельно kubelet начинает его останавливать. В документации про EndpointSlice сказано, что условие `terminating` выставляется, когда под впервые удалён (получил `deletionTimestamp`), скорее всего до выхода контейнеров, и что сервисные прокси обычно игнорируют такие адреса. Но до балансировщиков и ingress-контроллеров эта новость доходит не мгновенно: пока она идёт, запрос может прийти к уже остановленному приложению. Без `preStop` (или паузы в самом приложении) `TERM` приходит сразу, и приложение закрывает порт ([[Сигналы в Linux#Kubernetes при остановке пода]]); `preStop` с паузой оттягивает `TERM` ([[Ресурсы и остановка в Kubernetes#Остановка пода]]).
 
-В песочнице гонку стабильно воспроизвести не удаётся: здесь один узел и нет внешнего балансировщика, а kube-proxy узнаёт об изменении почти сразу, поэтому потерянных запросов не получить, и придумывать их вывод я не буду. Показан механизм: под без `preStop`, его адрес в EndpointSlice опрашивается каждые 0,1 секунды, а лог пода идёт с метками времени.
+Потерянные запросы в песочнице получить не вышло: в прогоне ниже адрес стал `terminating` сразу, а `TERM` пришёл только через пару секунд, то есть порядок оказался благоприятным. Поэтому здесь показан механизм, а не потери: под без `preStop`, его адрес в EndpointSlice опрашивается каждые 0,1 секунды, а лог пода идёт с метками времени.
 
 ```sh title="stop-no-prestop.sh"
 kubectl delete namespace demo-502 --ignore-not-found --wait --timeout=120s
@@ -203,12 +203,14 @@ logger=$!
 echo "$(date -u +%H:%M:%S) kubectl delete pod"
 kubectl delete pod nohook -n demo-502 --wait=false >/dev/null
 prev=""
+ok=""
 for _ in $(seq 100); do
   s="$(state)"
   [ "$s" != "$prev" ] && echo "$(date -u +%H:%M:%S) endpoint: ${s:-none}" && prev="$s"
-  [ -z "$s" ] && break
+  [ -z "$s" ] && { ok=1; break; }
   sleep 0.1
 done
+[ -n "$ok" ] || { echo "timeout: endpoint did not disappear" >&2; exit 1; }
 kubectl wait pod/nohook -n demo-502 --for=delete --timeout=60s
 wait "$logger"
 echo "--- pod log (UTC)"
@@ -221,22 +223,22 @@ namespace/demo-502 created
 pod/nohook created
 service/nohook created
 pod/nohook condition met
-12:27:55 kubectl delete pod
-12:27:55 endpoint: ready=false serving=true terminating=true
-12:27:58 endpoint: none
+13:05:36 kubectl delete pod
+13:05:36 endpoint: ready=false serving=true terminating=true
+13:05:39 endpoint: none
 pod/nohook condition met
 --- pod log (UTC)
-2026-11-21T12:27:57.806730131Z got TERM, shutting down
+2026-11-21T13:05:38.840357511Z got TERM, shutting down
 namespace "demo-502" deleted
 ```
 
-Время из `date` — с точностью до секунды, из лога — с наносекундами, оба в UTC. В песочнице адрес сразу помечается `ready=false terminating=true`, затем исчезает, а `TERM` приходит через пару секунд после удаления. Чтобы увидеть гонку, надо, чтобы читатель списка адресов отставал от kubelet; на одном узле он не отстаёт, а в кластере с ingress-контроллером или внешним балансировщиком отстаёт, и тогда без паузы появляются 502. Поэтому лечение двойное: readiness-проба у приложения (трафик только на готовые поды) и пауза перед остановкой (`preStop` с `sleep` или задержка закрытия порта в самом приложении), плюс `terminationGracePeriodSeconds`, который вмещает паузу и завершение работы.
+Время из `date` — с точностью до секунды, из лога — с наносекундами, оба в UTC. В прогоне адрес сразу помечается `ready=false terminating=true`, затем исчезает, а `TERM` приходит через пару секунд после удаления. Чтобы появилась гонка, читатель списка адресов (ingress-контроллер, внешний балансировщик) должен отстать от kubelet; насколько он отстаёт, зависит от него и в песочнице не измерялось, а пауза в `preStop` нужна как запас на это отставание. Поэтому лечение двойное: readiness-проба у приложения (трафик только на готовые поды) и пауза перед остановкой (`preStop` с `sleep` или задержка закрытия порта в самом приложении), плюс `terminationGracePeriodSeconds`, который вмещает паузу и завершение работы.
 
 ### Частые ошибки в ответе
 
 - «502 — это баг Kubernetes, надо увеличить число реплик». Реплики не убирают окно между остановкой пода и обновлением адресов у прокси; помогают проба и пауза при остановке.
 - «Достаточно `terminationGracePeriodSeconds` побольше». Он только предел; без паузы и обработчика `TERM` под всё равно закроет порт сразу.
-- «`kubectl delete pod --force --grace-period=0` ускорит выкатку». Он не ждёт kubelet и убирает объект из API раньше, чем остановлен контейнер: окно потерь запросов становится хуже, а не лучше.
+- «`kubectl delete pod --force --grace-period=0` ускорит выкатку». Он убирает объект из API, не дожидаясь подтверждения от kubelet (документация Kubernetes), и никакой паузы для обновления адресов у прокси не создаёт.
 - «`preStop` с `sleep` можно в любом образе». В образе без `sleep` и оболочки хук не выполнится; подробнее — в [[Ресурсы и остановка в Kubernetes#Остановка пода]].
 
 ## Медленно и троттлинг
@@ -265,10 +267,12 @@ spec:
         limits: {cpu: 200m}
 YAML
 kubectl wait pod/burner -n demo-cpu --for=condition=Ready --timeout=60s
+ok=""
 for _ in $(seq 40); do
-  kubectl top pod burner -n demo-cpu --no-headers 2>/dev/null | grep -q . && break
+  kubectl top pod burner -n demo-cpu --no-headers 2>/dev/null | grep -q . && { ok=1; break; }
   sleep 3
 done
+[ -n "$ok" ] || { echo "timeout: metrics-server returned no data" >&2; exit 1; }
 echo "--- kubectl top pod"
 kubectl top pod burner -n demo-cpu | sed 's/ *$//'
 stat() { kubectl exec burner -n demo-cpu -- grep -E 'nr_periods|nr_throttled' /sys/fs/cgroup/cpu.stat | tr '\n' ' '; echo; }
@@ -276,11 +280,13 @@ echo "--- cpu.stat, twice"
 first="$(stat)"
 echo "$first"
 base="$(echo "$first" | awk '{ print $2 }')"
+ok=""
 for _ in $(seq 40); do
   second="$(stat)"
-  [ "$(echo "$second" | awk '{ print $2 }')" -ge $((base + 30)) ] && break
+  [ "$(echo "$second" | awk '{ print $2 }')" -ge $((base + 30)) ] && { ok=1; break; }
   sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: nr_periods did not grow" >&2; exit 1; }
 echo "$second"
 echo "--- cpu.max"
 kubectl exec burner -n demo-cpu -- cat /sys/fs/cgroup/cpu.max
@@ -295,8 +301,8 @@ pod/burner condition met
 NAME     CPU(cores)   MEMORY(bytes)
 burner   200m         12Mi
 --- cpu.stat, twice
-nr_periods 190 nr_throttled 181 
-nr_periods 226 nr_throttled 217 
+nr_periods 157 nr_throttled 157 
+nr_periods 194 nr_throttled 194 
 --- cpu.max
 20000 100000
 namespace "demo-cpu" deleted
@@ -319,7 +325,7 @@ namespace "demo-cpu" deleted
 - `kubectl debug` — добавить в работающий под эфемерный контейнер с нужными утилитами. По документации, он нужен, когда `exec` недостаточно: контейнер упал или в образе нет отладочных инструментов (например, distroless). Параметр `--target` указывает контейнер, чьё пространство процессов нужно увидеть; рантайм должен это поддерживать, иначе процессы чужого контейнера не видны. Эфемерный контейнер никогда не перезапускается автоматически, и для добавления нужно право на подресурс `pods/ephemeralcontainers`, которого нет в стандартных ролях `edit` и `admin`.
 - `kubectl port-forward` — пробросить порт пода на локальную машину и ходить на него `curl` с локального хоста, минуя Service.
 
-Опыт: под с приложением; в нём `exec` читает процесс 1; `debug` кладёт рядом `busybox` с `--target=app`, видит процесс приложения и ходит на `localhost`; наконец, `port-forward` в фоне и `curl` с локальной машины. Фоновый `port-forward` останавливается в этом же блоке.
+Опыт: под с приложением; в нём `exec` читает процесс 1; `debug` кладёт рядом `busybox` с `--target=app`, видит процесс приложения и ходит на `localhost`; наконец, `port-forward` в фоне и `curl` с локальной машины. Локальный порт выбирает сам `kubectl` (запись `:8080` вместо `порт:8080`, по документации Kubernetes), блок разбирает его из вывода. Фоновый `port-forward` останавливается в этом же блоке.
 
 ```sh title="debug.sh"
 kubectl delete namespace demo-debug --ignore-not-found --wait --timeout=120s
@@ -342,22 +348,27 @@ kubectl exec web -n demo-debug -- sh -c 'id -un; python --version; tr "\0" " " <
 echo "--- debug"
 kubectl debug web -n demo-debug -c dbg --image=busybox:1.37.0 --target=app -- \
   sh -c 'ps | head -4; wget -qO- http://localhost:8080; echo' 2>&1 | short
+ok=""
 for _ in $(seq 30); do
   s="$(kubectl get pod web -n demo-debug -o jsonpath='{.status.ephemeralContainerStatuses[?(@.name=="dbg")].state.terminated.reason}')"
-  [ -n "$s" ] && break
+  [ -n "$s" ] && { ok=1; break; }
   sleep 1
 done
+[ -n "$ok" ] || { echo "timeout: ephemeral container did not finish" >&2; exit 1; }
 kubectl logs web -n demo-debug -c dbg
 echo "--- containers of the pod"
 kubectl get pod web -n demo-debug -o jsonpath='containers={.spec.containers[*].name} ephemeral={.spec.ephemeralContainers[*].name}{"\n"}'
 echo "--- port-forward"
-kubectl port-forward -n demo-debug pod/web 18080:8080 >/dev/null &
+kubectl port-forward -n demo-debug pod/web :8080 > pf.log &
 pf=$!
-for _ in $(seq 30); do
-  curl -s -o /dev/null localhost:18080/healthz && break
+ok=""
+for _ in $(seq 40); do
+  port="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) -> .*/\1/p' pf.log)"
+  [ -n "$port" ] && curl -s -o /dev/null "localhost:$port/healthz" && { ok=1; break; }
   sleep 0.5
 done
-curl -s localhost:18080/; echo
+[ -n "$ok" ] || { echo "timeout: port-forward did not come up" >&2; kill "$pf"; exit 1; }
+curl -s "localhost:$port/"; echo
 kill "$pf"
 wait "$pf" 2>/dev/null
 kubectl delete namespace demo-debug --wait --timeout=120s
