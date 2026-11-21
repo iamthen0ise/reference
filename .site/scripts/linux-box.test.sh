@@ -52,6 +52,15 @@ ${fence}sh title="sleep.sh"
 sleep 10
 ${fence}
 
+${fence}sh title="ignore-term.sh"
+trap '' TERM
+sleep 30
+${fence}
+
+${fence}sh title="self-kill.sh"
+kill -KILL \$\$
+${fence}
+
 ${fence}sh title="stdin.sh"
 cat
 echo after
@@ -78,6 +87,12 @@ else
   bad up; cat "$tmp/up.log" >&2
 fi
 
+run empty-args "" ""
+if [ "$rc" -eq 2 ] && grep -q '^usage:' "$tmp/err"; then ok empty-args; else bad empty-args; fi
+
+run empty-title "$tmp/page.md" ""
+if [ "$rc" -eq 2 ] && grep -q '^usage:' "$tmp/err"; then ok empty-title; else bad empty-title; fi
+
 run not-found "$tmp/page.md" nope.sh
 if [ "$rc" -eq 1 ] && grep -q 'block not found: nope.sh' "$tmp/err"; then ok not-found; else bad not-found; fi
 
@@ -100,6 +115,12 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "1" ]; then ok privileged; else ba
 
 LINUX_BOX_TIMEOUT=2 run timeout "$tmp/page.md" sleep.sh
 if [ "$rc" -eq 124 ] && grep -q 'block timed out' "$tmp/err"; then ok timeout; else bad timeout; fi
+
+LINUX_BOX_TIMEOUT=1 run timeout-kill "$tmp/page.md" ignore-term.sh
+if [ "$rc" -eq 137 ] && grep -q 'block timed out: ignore-term.sh' "$tmp/err"; then ok timeout-kill; else bad timeout-kill; fi
+
+run self-kill "$tmp/page.md" self-kill.sh
+if [ "$rc" -eq 137 ] && ! grep -q 'timed out' "$tmp/err"; then ok self-kill; else bad self-kill; fi
 
 run crlf "$tmp/crlf.md" one.sh
 if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "$(printf 'hi\n0')" ]; then ok crlf; else bad crlf; fi

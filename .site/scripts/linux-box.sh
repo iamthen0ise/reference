@@ -48,7 +48,7 @@ cmd_up() {
 }
 
 cmd_block() {
-  [ $# -eq 2 ] || usage
+  [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || usage
   local page="$1" title="$2" code lang
   code="$(extract_block "$page" "$title")" || exit 1
   is_running || { echo "not running: $container; run make linux-up" >&2; exit 1; }
@@ -59,13 +59,18 @@ cmd_block() {
   # читающая stdin, не съест остаток скрипта.
   local f="/tmp/linux-box-block.$$.$RANDOM" rc=0
   printf '%s\n' "$body" | docker exec -i "$container" sh -c 'cat > "$1"' _ "$f"
+  local start=$SECONDS
   case "$lang" in
     sh) docker exec -i -w /root "$container" timeout -k 5 "$limit" bash "$f" </dev/null || rc=$? ;;
     python) docker exec -i -w /root "$container" timeout -k 5 "$limit" python3 -u "$f" </dev/null || rc=$? ;;
     *) echo "unknown language: $lang" >&2; rc=1 ;;
   esac
   docker exec "$container" rm -f "$f" >/dev/null 2>&1 || true
-  if [ "$rc" -eq 124 ]; then echo "block timed out: $title" >&2; fi
+  # 124 — блок снят по TERM; 137 — проигнорировал TERM и добит KILL через 5 с (timeout -k).
+  # Те же коды даёт и сам блок (137 — любой SIGKILL, например OOM), поэтому ещё сверяем время с лимитом.
+  if { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && [ $((SECONDS - start)) -ge "$limit" ]; then
+    echo "block timed out: $title" >&2
+  fi
   exit "$rc"
 }
 
