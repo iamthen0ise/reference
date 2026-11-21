@@ -54,7 +54,7 @@ SIZE      CREATED BY
 8.8MB     ADD alpine-minirootfs-3.21.10-aarch64.tar.gz…
 ```
 
-Читать снизу вверх, как строились слои. Две нижние строки (`ADD alpine-minirootfs…`, `CMD ["/bin/sh"]`) и `ENV` с `PATH` — из базового образа. `0B` у `ENV`, `LABEL`, `EXPOSE`, `CMD`: файлов они не меняют. Ненулевой размер у `RUN` и `COPY`, а у `WORKDIR` — тоже: он создал каталог `/app`. Размеры будут другими на другой платформе.
+Читать снизу вверх, как строились слои. Две нижние строки (`ADD alpine-minirootfs…`, `CMD ["/bin/sh"]`) — из базового образа, выше идут наши инструкции. `0B` у `ENV`, `LABEL`, `EXPOSE`, `CMD`: файлов они не меняют. Ненулевой размер у `RUN` и `COPY`, а у `WORKDIR` — тоже: он создал каталог `/app`. Размеры будут другими на другой платформе.
 
 ### Частые ошибки в ответе
 
@@ -127,16 +127,6 @@ built [3/3] RUN echo "install $(cat /app/requirements.txt)" > /ap…
 
 После правки `main.py` в хорошем порядке пересобран только `COPY main.py`; в плохом `COPY . /app/` увидел изменённый файл, и вместе с ним заново прошла и установка зависимостей. На настоящем `pip install` это минуты вместо секунд.
 
-Пример Dockerfile для чтения (пример, не прогоняется):
-
-```dockerfile
-FROM python:3.13-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY src/ ./src/
-```
-
 ### Частые ошибки в ответе
 
 - «`RUN apt-get update` в кэше всегда свежий». Кэш `RUN` не сбрасывается сам: устаревший список пакетов остаётся, пока не пересоберёшь с `--no-cache` или не изменишь текст команды. Поэтому `apt-get update` и `install` пишут в одном `RUN`.
@@ -157,32 +147,32 @@ RUN head -c 50000000 /dev/urandom > /big.bin && rm /big.bin
 EOF
 docker build -q -f a.Dockerfile -t ref-rm:separate . > /dev/null
 docker build -q -f b.Dockerfile -t ref-rm:same . > /dev/null
-docker image ls ref-rm --format 'table {{.Tag}}\t{{.Size}}'
-echo "== файла в контейнере нет:"
-docker run --rm ref-rm:separate ls /big.bin || echo "код выхода: $?"
-echo "== но слой с ним остался в истории:"
-docker history --format 'table {{.Size}}\t{{.CreatedBy}}' ref-rm:separate | head -3
+for t in separate same; do
+  echo "== $t: размер образа в байтах и два верхних слоя"
+  docker image inspect --format '{{.Size}}' ref-rm:$t
+  docker history --format 'table {{.Size}}\t{{.CreatedBy}}' ref-rm:$t | head -3
+done
 docker rmi ref-rm:separate ref-rm:same > /dev/null
 ```
 
 ```text title="Вывод"
-TAG        SIZE
-same       12.8MB
-separate   113MB
-== файла в контейнере нет:
-ls: /big.bin: No such file or directory
-код выхода: 1
-== но слой с ним остался в истории:
+== separate: размер образа в байтах и два верхних слоя
+53992722
 SIZE      CREATED BY
 4.1kB     RUN /bin/sh -c rm /big.bin # buildkit
 50MB      RUN /bin/sh -c head -c 50000000 /dev/urandom…
+== same: размер образа в байтах и два верхних слоя
+3976854
+SIZE      CREATED BY
+4.1kB     RUN /bin/sh -c head -c 50000000 /dev/urandom…
+0B        CMD ["/bin/sh"]
 ```
 
-Разница в `docker image ls` здесь даже больше самого файла: хранилище containerd считает размер иначе, чем `docker history`, и абсолютным числам в колонке верить не стоит. Надёжнее смотреть `docker history`: слой в 50 МБ на месте, хотя `rm` отработал. Лекарство — создать и удалить в одном `RUN` (слоя с файлом не появится), а ещё лучше не класть лишнее в образ вовсе.
+Размер из `docker image inspect` (в байтах): у `separate` около 54 МБ, у `same` около 4 МБ — база без файла. В истории `separate` слой в 50 МБ стоит на месте, хотя следующий `RUN rm` отработал; у `same` слоя с файлом нет, `RUN` дал почти ноль. Числа зависят от платформы и хранилища образов, важно соотношение. Лекарство — создать и удалить в одном `RUN` (слоя с файлом не появится), а ещё лучше не класть лишнее в образ вовсе.
 
 ### Контекст сборки и dockerignore
 
-Перед сборкой клиент отправляет builder'у контекст — каталог сборки. Файлы из `.dockerignore` в контекст не попадают, это ускоряет сборку (особенно с удалённым builder'ом) и не даёт случайно скопировать в образ `.env` или `.git`. Шаблоны — как в glob Go, `data/` и `data` равнозначны, `!` задаёт исключение; сами `Dockerfile` и `.dockerignore` отправляются всегда, но скопировать их в образ нельзя.
+Перед сборкой клиент отправляет builder'у контекст — каталог сборки. Файлы из `.dockerignore` в контекст не попадают, это ускоряет сборку (особенно с удалённым builder'ом) и не даёт случайно скопировать в образ `.env` или `.git`. Шаблоны — как в glob Go, `data/` и `data` равнозначны, `!` задаёт исключение; сами `Dockerfile` и `.dockerignore` отправляются builder'у всегда (нужны для сборки). `COPY . …` скопирует и `Dockerfile` в образ, если он не перечислен в `.dockerignore`: в блоке ниже он виден в `/app`.
 
 Блок кладёт в контекст 30 МБ мусора и собирает образ с `COPY . /app/` без `.dockerignore` и с ним.
 
@@ -219,7 +209,7 @@ Dockerfile
 main.py
 ```
 
-Время передачи у вас будет другим. Без `.dockerignore` на builder ушло 30 МБ, с ним — сто байт. Заметьте: на этом прогоне при точечном `COPY main.py` и без `.dockerignore` передавалось всего несколько десятков байт, то есть сборка тянет только нужные файлы; а `.dockerignore` особенно нужен при `COPY . …`.
+Время передачи у вас будет другим. Без `.dockerignore` на builder ушло 30 МБ, с ним — сто байт. Мусор из `data/` в образ не попал: `ls` показывает только `Dockerfile` и `main.py` (файл `.dockerignore` скрыт из-за точки в имени).
 
 ### Многоэтапная сборка
 
@@ -242,22 +232,24 @@ CMD ["cat", "/result.txt"]
 EOF
 docker build -q -f single.Dockerfile -t ref-ms:single . > /dev/null
 docker build -q -f multi.Dockerfile -t ref-ms:multi . > /dev/null
-docker image ls ref-ms --format 'table {{.Tag}}\t{{.Size}}'
+for t in single multi; do
+  printf '%s: ' "$t"
+  docker image inspect --format '{{.Size}}' ref-ms:$t
+done
 docker run --rm ref-ms:multi
 docker run --rm ref-ms:multi ls /toolchain.bin || echo "код выхода: $?"
 docker rmi ref-ms:single ref-ms:multi > /dev/null
 ```
 
 ```text title="Вывод"
-TAG       SIZE
-multi     12.8MB
-single    92.8MB
+single: 43989911
+multi: 3977052
 result
 ls: /toolchain.bin: No such file or directory
 код выхода: 1
 ```
 
-Многоэтапный образ остался размером с базовый, в нём нет `/toolchain.bin` (код выхода 1 из `ls` показан намеренно). В реальном проекте так отделяют компилятор и `-dev`-пакеты от рантайма. Размеры зависят от платформы.
+Размер из `docker image inspect` (в байтах): у `single` около 44 МБ, у `multi` около 4 МБ — как у базового образа. В нём нет `/toolchain.bin` (код выхода 1 из `ls` показан намеренно). В реальном проекте так отделяют компилятор и `-dev`-пакеты от рантайма. Числа зависят от платформы.
 
 ### Частые ошибки в ответе
 
@@ -267,9 +259,10 @@ ls: /toolchain.bin: No such file or directory
 
 ## ENTRYPOINT и CMD
 
-`ENTRYPOINT` — что запускается, `CMD` — аргументы по умолчанию. Если задан exec-форма `ENTRYPOINT`, то аргументы `docker run` после имени образа заменяют `CMD`, а `ENTRYPOINT` остаётся. Без `ENTRYPOINT` аргументы заменяют всю команду из `CMD`. Заменить сам `ENTRYPOINT` можно флагом `--entrypoint`. У shell-формы (`ENTRYPOINT команда аргументы` без квадратных скобок) есть ловушка: команда запускается как `/bin/sh -c`, `CMD` и аргументы `docker run` ей не передаются, а сам `sh` не пробрасывает сигналы. Что это значит для остановки контейнера, разобрано в [[Сигналы в Linux#Сигналы и PID 1 в контейнере]].
+`ENTRYPOINT` — что запускается, `CMD` — аргументы по умолчанию. Если задана exec-форма `ENTRYPOINT`, то аргументы `docker run` после имени образа заменяют `CMD`, а `ENTRYPOINT` остаётся. Без `ENTRYPOINT` аргументы заменяют всю команду из `CMD`. Заменить сам `ENTRYPOINT` можно флагом `--entrypoint`. У shell-формы (`ENTRYPOINT команда аргументы` без квадратных скобок) есть ловушка: команда запускается как `/bin/sh -c`, `CMD` и аргументы `docker run` ей не передаются, а сам `sh` не пробрасывает сигналы. Что это значит для остановки контейнера, разобрано в [[Сигналы в Linux#Сигналы и PID 1 в контейнере]].
 
 ```sh title="entrypoint-cmd.sh"
+docker rm -f ref-ep-exec ref-ep-sh > /dev/null 2>&1
 cat > both.Dockerfile <<'EOF'
 FROM alpine:3.21
 ENTRYPOINT ["echo", "entrypoint:"]
@@ -334,7 +327,7 @@ ref-ep-exec: sleep 30
 ref-ep-sh: /bin/sh -c sleep 30; echo bye 
 ```
 
-В shell-форме приложение получило пустой `$@`: `other-arg` потерян. Последние две строки — PID 1: в exec-форме это сам `sleep`, в shell-форме — `/bin/sh -c …`, то есть сигнал `docker stop` придёт оболочке, а не приложению.
+В образе `ref-ep:sh` команда `sleep 30; echo bye` нарочно составная: так `sh` остаётся процессом-оболочкой и не заменяется одной командой. В shell-форме приложение получило пустой `$@`: `other-arg` потерян. Последние две строки — PID 1: в exec-форме это сам `sleep`, в shell-форме — `/bin/sh -c …`, то есть сигнал `docker stop` придёт оболочке, а не приложению.
 
 ### Частые ошибки в ответе
 
@@ -363,8 +356,6 @@ echo "== до: без USER"
 docker run --rm ref-user:root
 echo "== после: USER app"
 docker run --rm ref-user:app
-echo "== запись в /etc от обычного пользователя"
-docker run --rm ref-user:app sh -c 'touch /etc/x' || echo "код выхода: $?"
 echo "== --user переопределяет USER образа"
 docker run --rm --user root ref-user:app sh -c 'echo uid=$(id -u) name=$(id -un)'
 docker rmi ref-user:root ref-user:app > /dev/null
@@ -375,14 +366,11 @@ docker rmi ref-user:root ref-user:app > /dev/null
 uid=0 name=root
 == после: USER app
 uid=10001 name=app
-== запись в /etc от обычного пользователя
-touch: /etc/x: Permission denied
-код выхода: 1
 == --user переопределяет USER образа
 uid=0 name=root
 ```
 
-Код выхода 1 и `Permission denied` показаны намеренно: обычный пользователь не может писать в `/etc`. В многоэтапной сборке `USER` ставят в итоговом этапе: образ в прод уходит из него.
+В многоэтапной сборке `USER` ставят в итоговом этапе: образ в прод уходит из него.
 
 ### Частые ошибки в ответе
 
@@ -391,7 +379,7 @@ uid=0 name=root
 
 ## Секреты при сборке
 
-`ARG` и `ENV` остаются в образе: по документации Docker, кто может прочитать образ, прочтёт и их. Секрет попадает не только в итоговый `ENV`: значение `ARG`, использованное в `RUN`, записывается в историю слоя. Правильный способ — монтирование секрета на время одного `RUN`: `RUN --mount=type=secret,id=<имя>` и `docker build --secret id=<имя>,src=<файл>`; файл лежит в `/run/secrets/<имя>` только во время этого `RUN`. Значение здесь заведомо ненастоящее (`dummy-not-a-secret`), оно создаётся внутри блока.
+`ARG` и `ENV` остаются в образе: по документации Docker, кто может прочитать образ, прочтёт и их. Секрет попадает не только в итоговый `ENV`: объявленный `ARG` записывается в историю слоёв, даже если ни один `RUN` его не использует: в блоке ниже `TOKEN` нигде не подставляется в команду, но попадает в строку `RUN |1 TOKEN=…`. Правильный способ — монтирование секрета на время одного `RUN`: `RUN --mount=type=secret,id=<имя>` и `docker build --secret id=<имя>,src=<файл>`; файл лежит в `/run/secrets/<имя>` только во время этого `RUN`. Значение здесь заведомо ненастоящее (`dummy-not-a-secret`), оно создаётся внутри блока.
 
 ```sh title="secrets.sh"
 echo 'dummy-not-a-secret' > s.txt
@@ -441,7 +429,7 @@ API_TOKEN=dummy-not-a-secret
 
 ### Частые ошибки в ответе
 
-- «ARG не попадает в образ, в отличие от ENV». Попадает: значение `ARG`, использованное в `RUN`, видно в `docker history --no-trunc` (проверено в блоке выше).
+- «ARG не попадает в образ, в отличие от ENV». Попадает: объявленный `ARG` виден в `docker history --no-trunc` в `ARG` и в последующих `RUN`, даже когда команда его не использует (проверено в блоке выше). «Не использую — значит, безопасно» неверно.
 - «`unset` или `rm` в следующем `RUN` стирает секрет». Прежний слой остаётся с секретом (см. «Размер образа»).
 - «Секрет можно `COPY` и удалить». Он остаётся в слое. Только `--mount=type=secret` не оставляет следов в слоях.
 
@@ -469,6 +457,7 @@ echo "второй образ:  $b" | cut -c1-40
 docker run --rm ref-tag:1 cat /v.txt
 docker image inspect "$a" > /dev/null 2>&1 || echo "первого образа по ID больше нет"
 docker rmi ref-tag:1 > /dev/null
+docker rmi "$a" > /dev/null 2>&1 || true
 ```
 
 ```text title="Вывод"
@@ -476,14 +465,14 @@ alpine@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a
 == запуск по digest вместо тега
 3.20.3
 == перезапись локального тега другим образом
-первый образ:  sha256:3850501a9fbb06e3cf
-второй образ:  sha256:4712fc4c2847737c71
+первый образ:  sha256:3fcd329826b022e1ca
+второй образ:  sha256:486841f718e637307b
 тег ref-tag:1 теперь указывает на другой образ
 two
 первого образа по ID больше нет
 ```
 
-Идентификаторы образов у вас будут другими. Тег `ref-tag:1` сначала указывал на образ «one», после второй сборки — на «two»; всё, что запускается по имени `ref-tag:1`, получило другое содержимое без единого изменения в манифесте. В этой песочнице старый образ по ID после перезаписи уже недоступен: после перезаписи тега он исчез совсем, так что на локальный образ как на запас для отката рассчитывать нельзя. Базовый `alpine:3.20.3` блок оставляет, как и любой скачанный базовый образ.
+Идентификаторы образов у вас будут другими. Тег `ref-tag:1` сначала указывал на образ «one», после второй сборки — на «two»; всё, что запускается по имени `ref-tag:1`, получило другое содержимое без единого изменения в манифесте. В этой песочнице (Docker Desktop с хранилищем containerd) старый образ по ID после перезаписи уже недоступен; в другом хранилище он может остаться без имени. Базовый `alpine:3.20.3` блок оставляет, как и любой скачанный базовый образ.
 
 Для деплоя из этого следуют два правила. В Dockerfile база закреплена по версии (`FROM python:3.13-slim`, не `latest` и не голое имя): иначе пересборка завтра даст другой образ. В манифесте Kubernetes — конкретный тег или digest; почему обновление образа под тем же тегом не запускает выкатку, показано в [[Деплой в Kubernetes]].
 
