@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Прогон демонстраций страниц «Docker и Kubernetes» в песочнице kind: up | block PAGE TITLE | down.
+# Побочный эффект `up`: хостовый тег busybox:1.37.0 перезаписывается одноплатформенной копией с лишним LABEL; `down` это не откатывает.
+# Вернуть исходный образ: docker pull busybox:1.37.0
 # kubectl здесь всегда с песочным kubeconfig; ~/.kube/config (продовый контекст) не читается и не меняется.
 set -euo pipefail
 
