@@ -126,6 +126,7 @@ const sidebar = [
       },
     ],
   },
+  { label: 'Linux', items: pages('Linux', ['Процессы в Linux']) },
 ];
 
 export default defineConfig({

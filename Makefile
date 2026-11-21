@@ -1,4 +1,4 @@
-.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test
+.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test linux-up linux-block linux-shell linux-down linux-test
 
 PREVIEW_PORT ?= 4329
 PLAYWRIGHT_INSTALL_FLAGS ?=
@@ -54,3 +54,19 @@ sql-down:
 
 sql-test:
 	bash .site/scripts/sql-pg.test.sh
+
+# Прогон демонстраций страниц «Linux» в контейнере с Debian (образ из .site/linux-box).
+linux-up:
+	bash .site/scripts/linux-box.sh up
+
+linux-block:
+	bash .site/scripts/linux-box.sh block "$(PAGE)" "$(TITLE)"
+
+linux-shell:
+	bash .site/scripts/linux-box.sh shell
+
+linux-down:
+	bash .site/scripts/linux-box.sh down
+
+linux-test:
+	bash .site/scripts/linux-box.test.sh
