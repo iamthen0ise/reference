@@ -22,7 +22,7 @@ Deployment обновляет приложение через ReplicaSet: люб
 - `maxSurge` — сколько подов сверх желаемого числа можно создать во время выкатки;
 - `maxUnavailable` — сколько подов из желаемого числа могут быть недоступны.
 
-Оба поля — число или процент, по умолчанию `25%`. Проценты округляются: `maxSurge` вверх, `maxUnavailable` вниз. Для трёх реплик это один дополнительный под и ноль недоступных: контроллер сначала создаёт новый под, ждёт, пока он станет доступным, и только потом убирает старый. Обоим полям одновременно нельзя быть нулём, иначе выкатка не сдвинется с места.
+Оба поля — число или процент, по умолчанию `25%`. Проценты округляются: `maxSurge` вверх, `maxUnavailable` вниз. Для трёх реплик это один дополнительный под и ноль недоступных: контроллер сначала создаёт новый под, ждёт, пока он станет доступным, и только потом убирает старый. Оба поля одновременно нулём быть не могут: API отклонит такой манифест, потому что выкатка не смогла бы сдвинуться с места.
 
 Первый блок готовит сцену: Deployment `web` на `reference-app:1`, Service и под `busybox` для запросов изнутри кластера.
 
@@ -101,7 +101,7 @@ service/web exposed
 deployment "web" successfully rolled out
 pod/client condition met
 {"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"}
-version=1 pod=web-67fb57f565-4w27f
+version=1 pod=web-67fb57f565-dgqzc
 ```
 
 Стратегия по умолчанию видна в объекте, хотя в манифесте её не было. Скрипт `probe.sh` из ConfigMap пригодится ниже: он раз в секунду обращается к адресу и складывает коды ответа в файл. Теперь выкатим вторую версию и посмотрим, как контроллер двигал ReplicaSet.
@@ -335,7 +335,7 @@ true    reference-app:1
 
 ```sh title="rollout-undo.sh"
 kubectl rollout history deployment/stuck -n demo-rollout
-kubectl rollout undo deployment/stuck -n demo-rollout 2>/dev/null
+kubectl rollout undo deployment/stuck -n demo-rollout 2>&1 | cut -c1-88
 kubectl rollout status deployment/stuck -n demo-rollout --timeout=90s | tail -1
 kubectl rollout history deployment/stuck -n demo-rollout
 kubectl get rs -n demo-rollout -l app=stuck \
@@ -349,6 +349,7 @@ REVISION  CHANGE-CAUSE
 1         v1, reference-app:1
 2         v2, reference-app:2, NOT_READY=1
 
+Warning: resource deployments/stuck was previously managed with 'kubectl apply'. Rolling
 deployment.apps/stuck rolled back
 deployment "stuck" successfully rolled out
 deployment.apps/stuck 
@@ -363,7 +364,7 @@ deployment.apps "stuck" deleted from demo-rollout namespace
 service "stuck" deleted from demo-rollout namespace
 ```
 
-Блок выполняется после блока `rollout-stuck.sh`. `rollout undo` вернул шаблон предыдущей ревизии, и она получила новый номер: откат — это ещё одна выкатка, только на старый ReplicaSet. История хранится в старых ReplicaSet, их число ограничено `revisionHistoryLimit` (по умолчанию 10), а колонка `CHANGE-CAUSE` берётся из аннотации `kubernetes.io/change-cause`.
+Блок выполняется после блока `rollout-stuck.sh`. Предупреждение `rollout undo` про `last-applied-configuration` длинное и обрезано командой `cut` до ширины страницы; ошибки отката оно не скрывает. `rollout undo` вернул шаблон предыдущей ревизии, и она получила новый номер: откат — это ещё одна выкатка, только на старый ReplicaSet. История хранится в старых ReplicaSet, их число ограничено `revisionHistoryLimit` (по умолчанию 10), а колонка `CHANGE-CAUSE` берётся из аннотации `kubernetes.io/change-cause`.
 
 На проде откат — это откат манифеста в репозитории: коммит `revert`, и обычный конвейер выкатывает прежнее состояние. `kubectl rollout undo` меняет живой объект мимо репозитория; GitOps-контроллер вернёт «плохую» версию обратно, а вручную откатанное состояние никто не увидит. Команда годится в песочнице и как аварийная мера, о которой потом обязательно говорят команде.
 

@@ -76,7 +76,6 @@ kubectl get pods -n demo-resources -o custom-columns='NAME:.metadata.name,QOS:.s
 ```
 
 ```text title="Вывод"
-namespace "demo-resources" deleted
 namespace/demo-resources created
 pod/besteffort created
 pod/burstable created
@@ -198,7 +197,6 @@ kind: Deployment
 metadata:
   name: burn
 spec:
-  replicas: 1
   selector:
     matchLabels: {app: burn}
   template:
@@ -261,20 +259,20 @@ Waiting for deployment "burn" rollout to finish: 0 of 1 updated replicas are ava
 deployment "burn" successfully rolled out
 --- idle
 NAME   REFERENCE         TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
-burn   Deployment/burn   cpu: 1%/50%   1         3         1          32s
+burn   Deployment/burn   cpu: 1%/50%   1         3         1          31s
 deployment.apps/burn env updated
 Waiting for deployment "burn" rollout to finish: 1 old replicas are pending termination...
 Waiting for deployment "burn" rollout to finish: 1 old replicas are pending termination...
 deployment "burn" successfully rolled out
 --- under load
 NAME   REFERENCE         TARGETS         MINPODS   MAXPODS   REPLICAS   AGE
-burn   Deployment/burn   cpu: 201%/50%   1         3         3          76s
+burn   Deployment/burn   cpu: 201%/50%   1         3         3          90s
 MESSAGE
 New size: 3; reason: cpu resource utilization (percentage of request) above target
 namespace "demo-scale" deleted
 ```
 
-Колонка `TARGETS` — текущая загрузка против цели. Под ограничен лимитом 200m, то есть двумя requests, поэтому загрузка упирается в `200%`, а HPA доводит число реплик до `maxReplicas`. Здесь же видна связь с троттлингом: подам не дают больше лимита, а HPA ориентируется на `requests`. Сразу после старта metrics-server отдаёт метрики не мгновенно, поэтому первые минуты в событиях HPA бывают предупреждения `FailedGetResourceMetric`; это нормально. Загрузка в песочнице зависит от процессора ВМ, поэтому точные проценты у вас могут отличаться.
+Колонка `TARGETS` — текущая загрузка против цели. Под ограничен лимитом 200m, то есть двумя requests, поэтому загрузка упирается в `200%`, а HPA доводит число реплик до `maxReplicas`. Здесь же видна связь с троттлингом: подам не дают больше лимита, а HPA ориентируется на `requests`. Загрузка в песочнице зависит от процессора ВМ, поэтому точные проценты у вас могут отличаться.
 
 ### Частые ошибки в ответе
 
@@ -361,7 +359,7 @@ pod/drain condition met
 namespace "demo-stop" deleted
 ```
 
-Пока работает `preStop`, под ещё в EndpointSlice, но помечен `ready=false` и `terminating=true`: новые соединения на него идти не должны, а `serving=true` значит, что он ещё может обслуживать уже принятые. Лог показывает порядок: `preStop` начался сразу, а `got TERM` пришёл на 10 секунд позже, когда хук закончился. Пауза в `preStop` даёт время, пока kube-proxy, ingress-контроллеры и балансировщики узнают, что адрес выбыл: за это время приложение ещё принимает запросы. Короткий `sleep` в песочнице одного узла надёжно не показывает потерю запросов, поэтому здесь показан механизм, а не вывод потерь.
+Пока работает `preStop`, под ещё в EndpointSlice, но помечен `ready=false` и `terminating=true`: в идеале новые соединения на него уже не идут (но снятие адреса доходит до kube-proxy и балансировщиков с задержкой, ради чего и нужен `sleep` в `preStop`), а `serving=true` значит, что он ещё может обслуживать уже принятые. Лог показывает порядок: `preStop` начался сразу, а `got TERM` пришёл на 10 секунд позже, когда хук закончился. Пауза в `preStop` даёт время, пока kube-proxy, ingress-контроллеры и балансировщики узнают, что адрес выбыл: за это время приложение ещё принимает запросы. Короткий `sleep` в песочнице одного узла надёжно не показывает потерю запросов, поэтому здесь показан механизм, а не вывод потерь.
 
 В реальном сервисе пауза делается либо `preStop` с `sleep` (для образов с оболочкой или встроенным действием `sleep`), либо самим приложением: получив `TERM`, оно сначала продолжает принимать запросы ещё несколько секунд, потом закрывается. Срок `terminationGracePeriodSeconds` должен вмещать паузу плюс время завершения работы.
 
