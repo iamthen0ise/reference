@@ -1,4 +1,4 @@
-.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test linux-up linux-block linux-shell linux-down linux-test
+.PHONY: init run build check test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test linux-up linux-block linux-shell linux-down linux-test k8s-up k8s-block k8s-down k8s-test
 
 PREVIEW_PORT ?= 4329
 PLAYWRIGHT_INSTALL_FLAGS ?=
@@ -71,3 +71,17 @@ linux-down:
 
 linux-test:
 	bash .site/scripts/linux-box.test.sh
+
+# Прогон демонстраций страниц «Docker и Kubernetes» в кластере kind (docker + kubectl, kubeconfig — .site/k8s-box/kubeconfig).
+k8s-up:
+	bash .site/scripts/k8s-box.sh up
+
+k8s-block:
+	@test -n "$(PAGE)" -a -n "$(TITLE)" || { echo "usage: make k8s-block PAGE=\"Kubernetes/<page>.md\" TITLE=\"<name>\"" >&2; exit 2; }
+	bash .site/scripts/k8s-box.sh block "$(PAGE)" "$(TITLE)"
+
+k8s-down:
+	bash .site/scripts/k8s-box.sh down
+
+k8s-test:
+	bash .site/scripts/k8s-box.test.sh
