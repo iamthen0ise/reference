@@ -41,15 +41,15 @@ kubectl get pods -n kube-system \
 
 ```text title="Вывод"
 NAME                                              STATUS    NODE
-coredns-559f6c778d-56cpz                          Running   reference-control-plane
-coredns-559f6c778d-w8qmh                          Running   reference-control-plane
+coredns-559f6c778d-dv25k                          Running   reference-control-plane
+coredns-559f6c778d-rpng4                          Running   reference-control-plane
 etcd-reference-control-plane                      Running   reference-control-plane
-kindnet-hm24q                                     Running   reference-control-plane
+kindnet-9bhrg                                     Running   reference-control-plane
 kube-apiserver-reference-control-plane            Running   reference-control-plane
 kube-controller-manager-reference-control-plane   Running   reference-control-plane
-kube-proxy-sln8h                                  Running   reference-control-plane
+kube-proxy-8ksst                                  Running   reference-control-plane
 kube-scheduler-reference-control-plane            Running   reference-control-plane
-metrics-server-76558b4bb9-6vblx                   Running   reference-control-plane
+metrics-server-76558b4bb9-7rjrt                   Running   reference-control-plane
 ```
 
 Имена подов, IP и возраст у вас будут другими. Здесь видны apiserver, etcd, scheduler и controller-manager, kube-proxy и coredns (DNS кластера), а также сетевой плагин kind и metrics-server. Kubelet в списке нет: это процесс на узле, а не под.
@@ -123,11 +123,11 @@ NAME                  READY   UP-TO-DATE   AVAILABLE   AGE
 deployment.apps/web   2/2     2            2           2s
 
 NAME                             DESIRED   CURRENT   READY   AGE
-replicaset.apps/web-64549d9df5   2         2         2       2s
+replicaset.apps/web-64549d9df5   2         2         2       1s
 
 NAME                       READY   STATUS    RESTARTS   AGE
-pod/web-64549d9df5-gb4lp   1/1     Running   0          2s
-pod/web-64549d9df5-mh48m   1/1     Running   0          2s
+pod/web-64549d9df5-hpdch   1/1     Running   0          1s
+pod/web-64549d9df5-sjxxg   1/1     Running   0          1s
 ```
 
 Имена подов, IP и возраст у вас будут другими. Имя ReplicaSet — имя Deployment плюс хэш шаблона пода, имя пода — имя ReplicaSet плюс случайный суффикс. Теперь прочитаем владельцев из самих объектов.
@@ -143,7 +143,7 @@ echo "rs  $rs owner: $(kubectl get rs "$rs" -n demo-objects \
 ```
 
 ```text title="Вывод"
-pod web-64549d9df5-gb4lp owner: ReplicaSet/web-64549d9df5
+pod web-64549d9df5-hpdch owner: ReplicaSet/web-64549d9df5
 rs  web-64549d9df5 owner: Deployment/web
 ```
 
@@ -171,12 +171,12 @@ CREATED:.metadata.creationTimestamp
 ```
 
 ```text title="Вывод"
-deleting web-64549d9df5-gb4lp
-pod "web-64549d9df5-gb4lp" deleted from demo-objects namespace
+deleting web-64549d9df5-hpdch
+pod "web-64549d9df5-hpdch" deleted from demo-objects namespace
 deployment.apps/web condition met
 NAME                   STATUS    CREATED
-web-64549d9df5-2vrgt   Running   2026-11-21T11:05:27Z
-web-64549d9df5-mh48m   Running   2026-11-21T11:05:23Z
+web-64549d9df5-sjxxg   Running   2026-11-21T11:15:46Z
+web-64549d9df5-tlkxr   Running   2026-11-21T11:15:52Z
 ```
 
 Блок выполняется после блока `objects-up.sh`. Удалённого пода в списке нет, а рядом с уцелевшим стоит новый с другим суффиксом: ReplicaSet увидел одну реплику вместо двух и создал вторую.
@@ -191,7 +191,8 @@ web-64549d9df5-mh48m   Running   2026-11-21T11:05:23Z
 Label — пара «ключ-значение» на объекте. Selector — условие по labels. На них держится связь объектов: Deployment и ReplicaSet выбирают свои поды, Service — поды для трафика. Других ссылок между ними нет.
 
 ```sh title="labels.sh"
-kubectl get pods -n demo-objects --show-labels
+kubectl get pods -n demo-objects --show-labels --no-headers \
+  | awk '{print $1, $NF}'
 echo "--- app=web"
 kubectl get pods -n demo-objects -l app=web -o name
 echo "--- app=other"
@@ -199,17 +200,16 @@ kubectl get pods -n demo-objects -l app=other
 ```
 
 ```text title="Вывод"
-NAME                   READY   STATUS    RESTARTS   AGE   LABELS
-web-64549d9df5-2vrgt   1/1     Running   0          2s    app=web,pod-template-hash=64549d9df5
-web-64549d9df5-mh48m   1/1     Running   0          6s    app=web,pod-template-hash=64549d9df5
+web-64549d9df5-sjxxg app=web,pod-template-hash=64549d9df5
+web-64549d9df5-tlkxr app=web,pod-template-hash=64549d9df5
 --- app=web
-pod/web-64549d9df5-2vrgt
-pod/web-64549d9df5-mh48m
+pod/web-64549d9df5-sjxxg
+pod/web-64549d9df5-tlkxr
 --- app=other
 No resources found in demo-objects namespace.
 ```
 
-Блок выполняется после блока `objects-up.sh`. Метка `pod-template-hash` Deployment добавил сам: так ReplicaSet разных ревизий не путают чужие поды.
+Блок выполняется после блока `objects-up.sh`; `awk` оставляет имя пода и последнюю колонку `LABELS`, чтобы строка помещалась. Метка `pod-template-hash` Deployment добавил сам: так ReplicaSet разных ревизий не путают чужие поды.
 
 Из связи через labels следует хитрость: если сменить label у пода, он выйдет из-под ReplicaSet. ReplicaSet увидит недостачу и создаст замену, а старый под останется жить без владельца.
 
@@ -226,13 +226,13 @@ kubectl delete pod "$pod" -n demo-objects --wait=true
 ```
 
 ```text title="Вывод"
-pod/web-64549d9df5-2vrgt labeled
+pod/web-64549d9df5-sjxxg labeled
 deployment.apps/web condition met
 NAME                   APP        OWNER
-web-64549d9df5-2bpbf   web        ReplicaSet
-web-64549d9df5-2vrgt   detached   <none>
-web-64549d9df5-mh48m   web        ReplicaSet
-pod "web-64549d9df5-2vrgt" deleted from demo-objects namespace
+web-64549d9df5-m988x   web        ReplicaSet
+web-64549d9df5-sjxxg   detached   <none>
+web-64549d9df5-tlkxr   web        ReplicaSet
+pod "web-64549d9df5-sjxxg" deleted from demo-objects namespace
 ```
 
 Блок выполняется после блока `self-heal.sh`. Отцепленный под с `app=detached` остался без владельца (колонка `OWNER` пуста), ReplicaSet создал третий под. Так из работающего приложения достают под для отладки, не убивая его. В конце блок удаляет отцепленный под.
@@ -267,13 +267,13 @@ kubectl get pods -n demo-objects -l app=web \
 
 ```text title="Вывод"
 service/web created
-NAME   TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
-web    ClusterIP   10.96.127.125   <none>        80/TCP    0s
-NAME        ADDRESSTYPE   PORTS   ENDPOINTS                 AGE
-web-4hddl   IPv4          8080    10.244.0.41,10.244.0.39   0s
+NAME   TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+web    ClusterIP   10.96.97.253   <none>        80/TCP    0s
+NAME        ADDRESSTYPE   PORTS   ENDPOINTS               AGE
+web-tpb54   IPv4          8080    10.244.0.9,10.244.0.8   0s
 NAME                   IP
-web-64549d9df5-2bpbf   10.244.0.41
-web-64549d9df5-mh48m   10.244.0.39
+web-64549d9df5-m988x   10.244.0.9
+web-64549d9df5-tlkxr   10.244.0.8
 ```
 
 Блок выполняется после блока `detach.sh`. IP в колонке `ENDPOINTS` у EndpointSlice совпадают с IP подов ниже: Service нашёл их по label `app=web`. Порт Service (80) и порт контейнера (`targetPort` 8080) могут различаться.
@@ -305,12 +305,12 @@ search demo-objects.svc.cluster.local svc.cluster.local cluster.local
 nameserver 10.96.0.10
 options ndots:5
 --- short name
-version=1 pod=web-64549d9df5-mh48m
+version=1 pod=web-64549d9df5-tlkxr
 --- full name
-version=1 pod=web-64549d9df5-mh48m
+version=1 pod=web-64549d9df5-tlkxr
 --- 10 requests
-   3 pod=web-64549d9df5-2bpbf
-   7 pod=web-64549d9df5-mh48m
+   2 pod=web-64549d9df5-m988x
+   8 pod=web-64549d9df5-tlkxr
 ```
 
 Блок выполняется после блока `service-clusterip.sh`. Короткое и полное имя дают ответ от Service. Десять запросов разошлись по обоим подам; пропорция случайная, она не обязана быть пять к пяти.
@@ -368,9 +368,9 @@ kubectl get svc -n demo-objects
 service/web-np created
 service/web-lb created
 NAME     TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
-web      ClusterIP      10.96.127.125   <none>        80/TCP         3s
-web-lb   LoadBalancer   10.96.236.177   <pending>     80:30451/TCP   0s
-web-np   NodePort       10.96.33.104    <none>        80:30608/TCP   0s
+web      ClusterIP      10.96.97.253    <none>        80/TCP         2s
+web-lb   LoadBalancer   10.96.54.169    <pending>     80:31972/TCP   0s
+web-np   NodePort       10.96.129.196   <none>        80:30221/TCP   0s
 ```
 
 Блок выполняется после блока `service-dns.sh`. У `web-np` порт записан как `80:<порт узла>/TCP`, у `web-lb` в kind `EXTERNAL-IP` равен `<pending>`: в облаке там появился бы адрес балансировщика. Пара `web-np` и `web-lb` — песочница: порт узла kind снаружи Docker Desktop не открыт, поэтому в прогоне мы к ним не обращаемся.
@@ -404,22 +404,22 @@ kubectl get pods -n demo-objects -l app=web \
 
 ```text title="Вывод"
 service/web-headless created
-NAME           TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
-web            ClusterIP   10.96.127.125   <none>        80/TCP    4s
-web-headless   ClusterIP   None            <none>        80/TCP    0s
+NAME           TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+web            ClusterIP   10.96.97.253   <none>        80/TCP    3s
+web-headless   ClusterIP   None           <none>        80/TCP    0s
 --- nslookup web
 Address:	10.96.0.10:53
 Name:	web.demo-objects.svc.cluster.local
-Address: 10.96.127.125
+Address: 10.96.97.253
 --- nslookup web-headless
 Address:	10.96.0.10:53
 Name:	web-headless.demo-objects.svc.cluster.local
-Address: 10.244.0.39
+Address: 10.244.0.8
 Name:	web-headless.demo-objects.svc.cluster.local
-Address: 10.244.0.41
+Address: 10.244.0.9
 NAME                   IP
-web-64549d9df5-2bpbf   10.244.0.41
-web-64549d9df5-mh48m   10.244.0.39
+web-64549d9df5-m988x   10.244.0.9
+web-64549d9df5-tlkxr   10.244.0.8
 ```
 
 Блок выполняется после блока `service-types.sh`. У `web-headless` `CLUSTER-IP` равен `None`. DNS-имя `web` даёт один адрес (ClusterIP), `web-headless` — два адреса, и они совпадают с IP подов в списке ниже.
@@ -435,6 +435,7 @@ web-64549d9df5-mh48m   10.244.0.39
 Namespace делит кластер на логические области: имена объектов уникальны внутри namespace, через него делят ресурсы кластера между пользователями (квоты). Мы работали в `demo-objects`; `kube-system` — системные компоненты. DNS-имя сервиса содержит namespace, поэтому одноимённые сервисы в разных namespace не конфликтуют, а короткое имя раскрывается только в своём.
 
 ```sh title="namespace.sh"
+kubectl delete namespace demo-objects-other --ignore-not-found --wait --timeout=120s
 kubectl create namespace demo-objects-other
 kubectl run probe -n demo-objects-other --image=busybox:1.37.0 --restart=Never \
   -- sleep 3600
@@ -456,7 +457,7 @@ wget: bad address 'web'
 command terminated with exit code 1
 exit=1
 --- web.demo-objects
-version=1 pod=web-64549d9df5-mh48m
+version=1 pod=web-64549d9df5-m988x
 namespace/demo-objects
 namespace/demo-objects-other
 ```
