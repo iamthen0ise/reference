@@ -39,6 +39,18 @@ title: Reference
 - [[Ввод-вывод и сеть]] — цена системного вызова, `write` и `fsync`, `epoll`, сокет как дескриптор, `TIME_WAIT`, load average.
 - [[Контейнеры изнутри]] — namespaces, cgroups v2, троттлинг CPU, overlayfs, контейнер из `unshare` и `pivot_root`, что делает `docker run`.
 
+## Docker и Kubernetes
+
+- [[Docker и Kubernetes]] — короткие ответы на 30 секунд по всем темам ниже: образы и Docker на практике, объекты Kubernetes, выкатка, ресурсы, отладка.
+- [[Образы Docker]] — слои и `docker history`, кэш сборки, размер образа, `ENTRYPOINT` и `CMD`, пользователь не root, секреты при сборке, тег и digest.
+- [[Docker на практике]] — тома, bind mount и `tmpfs`, сети и имена, `EXPOSE` и `-p`, логи, лимит памяти и OOM, `--restart`, порядок запуска в Compose.
+- [[Объекты Kubernetes]] — control plane, Pod, Deployment и ReplicaSet, цикл согласования, labels, Service и DNS, типы Service, namespace.
+- [[Конфигурация и нагрузки в Kubernetes]] — ConfigMap и Secret, init-контейнер и sidecar, Job, CronJob, DaemonSet, StatefulSet, Ingress и Gateway API.
+- [[Деплой в Kubernetes]] — rolling update, readiness и выкатка, застрявшая выкатка и откат, три пробы.
+- [[Ресурсы и остановка в Kubernetes]] — requests, limits и QoS, смена ConfigMap, HPA, остановка пода и `preStop`, миграции и PodDisruptionBudget.
+- [[Отладка в Kubernetes]] — общий порядок, `CrashLoopBackOff`, `OOMKilled`, `Pending`, `ImagePullBackOff`, под `Running`, но не `Ready`.
+- [[Отладка сервисов и нагрузки в Kubernetes]] — Service не отвечает, 502 при выкатке, троттлинг CPU, `exec`, `debug` и `port-forward`.
+
 ## Как читать
 
-Алгоритмы: начни с шпаргалки по задачам — она ссылается на структуры и сортировки там, где нужна их теория. Python: начни с заметки [[Python]] — короткие ответы ведут в подробные разборы. Бэкенд: начни с чек-листа и проваливайся по ссылкам в разбор темы. Поиск по сайту — `Ctrl/⌘ + K`. Linux: начни с заметки [[Linux]] — короткие ответы ведут в разборы с прогонами в песочнице.
+Алгоритмы: начни с шпаргалки по задачам — она ссылается на структуры и сортировки там, где нужна их теория. Python: начни с заметки [[Python]] — короткие ответы ведут в подробные разборы. Бэкенд: начни с чек-листа и проваливайся по ссылкам в разбор темы. Поиск по сайту — `Ctrl/⌘ + K`. Linux: начни с заметки [[Linux]] — короткие ответы ведут в разборы с прогонами в песочнице. Docker и Kubernetes: начни с заметки [[Docker и Kubernetes]] — короткие ответы ведут в разборы с прогонами в песочнице.
