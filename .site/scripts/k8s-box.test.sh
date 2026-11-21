@@ -91,6 +91,14 @@ echo RAN
 kubectl get pods
 ${fence}
 
+${fence}sh title="docker-user.sh"
+echo RAN docker run --user 1000 busybox id
+${fence}
+
+${fence}sh title="kubectl-user.sh"
+echo RAN; kubectl get pods --user x
+${fence}
+
 ${fence}sh title="plain.sh"
 echo RAN
 ${fence}
@@ -195,6 +203,11 @@ if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran;
 run "$tmp/page.md" unset-form.sh
 if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran; then ok override-unset; else bad override-unset; fi
 
+run "$tmp/page.md" docker-user.sh
+if [ "$rc" -eq 0 ] && grep -q RAN "$tmp/out"; then ok docker-user-allowed; else bad docker-user-allowed; fi
+run "$tmp/page.md" kubectl-user.sh
+if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran; then ok override-user; else bad override-user; fi
+
 # kind подменён заглушкой, чтобы пройти проверку «кластер запущен»: настоящий кластер тесту не нужен.
 mkdir "$tmp/stub"
 printf '#!/bin/sh\necho "%s"\n' "$K8S_BOX_CLUSTER" > "$tmp/stub/kind"
@@ -218,9 +231,17 @@ wait "$bp" 2>/dev/null
 sleep 2
 if ! pgrep -f "sleep $s3" >/dev/null; then ok signal-forwarded; else bad signal-forwarded; pkill -KILL -f "sleep $s3"; fi
 
-K8S_BOX_KUBECONFIG="$HOME/.kube/config" bash "$script" down > "$tmp/out" 2> "$tmp/err"
-rc=$?
-if [ "$rc" -eq 1 ] && grep -q 'unsafe sandbox kubeconfig' "$tmp/err"; then ok unsafe-kubeconfig; else bad unsafe-kubeconfig; fi
+# Фальшивый HOME: настоящий ~/.kube тест не трогает.
+mkdir -p "$tmp/home/.kube"
+echo dummy > "$tmp/home/.kube/config"
+ln -s "$tmp/home/.kube/config" "$tmp/link-config"
+for kcfg in "$tmp/home/.kube/config" "$tmp/link-config"; do
+  HOME="$tmp/home" K8S_BOX_KUBECONFIG="$kcfg" bash "$script" down > "$tmp/out" 2> "$tmp/err"
+  rc=$?
+  if [ "$rc" -eq 1 ] && grep -q 'unsafe sandbox kubeconfig' "$tmp/err" && [ "$(cat "$tmp/home/.kube/config")" = dummy ]; then
+    ok "unsafe-kubeconfig-$(basename "$kcfg")"
+  else bad "unsafe-kubeconfig-$(basename "$kcfg")"; fi
+done
 
 if bash "$script" down > "$tmp/out" 2> "$tmp/err"; then ok down-absent; else bad down-absent; fi
 

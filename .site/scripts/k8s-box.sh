@@ -105,7 +105,9 @@ cmd_block() {
   local page="$1" title="$2" body ctx
   body="$(extract_block "$page" "$title")" || exit 1
 
-  if printf '%s\n' "$body" | grep -Eq -- '--context|--kubeconfig|KUBECONFIG=|unset[[:space:]]+KUBECONFIG|-u[[:space:]]+KUBECONFIG|-n[[:space:]]+KUBECONFIG|--(server|token|cluster|user)([=[:space:]]|$)'; then
+  if printf '%s\n' "$body" | grep -Eq -- '--context|--kubeconfig|KUBECONFIG=|unset[[:space:]]+KUBECONFIG|-u[[:space:]]+KUBECONFIG|-n[[:space:]]+KUBECONFIG' ||
+     printf '%s\n' "$body" | grep -E '(^|[^[:alnum:]_.-])kubectl([^[:alnum:]_.-]|$)' |
+       grep -Eq -- '--(server|token|cluster|user)([=[:space:]]|$)'; then
     echo "block overrides kubeconfig: $title" >&2
     exit 1
   fi
@@ -173,15 +175,31 @@ cmd_down() {
 }
 
 # Песочный kubeconfig не должен лежать в ~/.kube: kind create/delete переписали бы его, а down удалил.
-check_kubeconfig() {
-  local dir path kube
-  dir="$(dirname "$kubeconfig")"
+# Абсолютный путь без симлинков (включая сам файл, даже если его нет: тогда — по каталогу).
+resolve_path() {
+  local p="$1" dir link n=0
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    link="$(readlink "$p")"
+    case "$link" in /*) p="$link" ;; *) p="$(dirname "$p")/$link" ;; esac
+    n=$((n + 1))
+  done
+  dir="$(dirname "$p")"
   [ -d "$dir" ] && dir="$(cd "$dir" && pwd -P)"
-  path="$dir/$(basename "$kubeconfig")"
+  printf '%s/%s\n' "$dir" "$(basename "$p")"
+}
+
+check_kubeconfig() {
+  local path kube kube_real
+  [ -n "${HOME:-}" ] || { echo "HOME is not set; cannot check the sandbox kubeconfig" >&2; return 1; }
+  path="$(resolve_path "$kubeconfig")"
   kube="$HOME/.kube"
-  [ -d "$kube" ] && kube="$(cd "$kube" && pwd -P)"
+  kube_real="$kube"
+  [ -d "$kube" ] && kube_real="$(cd "$kube" && pwd -P)"
   case "$path" in
-    "$kube" | "$kube"/*) echo "unsafe sandbox kubeconfig: $kubeconfig" >&2; return 1 ;;
+    "$kube" | "$kube"/* | "$kube_real" | "$kube_real"/*) echo "unsafe sandbox kubeconfig: $kubeconfig" >&2; return 1 ;;
+  esac
+  case "$kubeconfig" in
+    "$kube" | "$kube"/* | "$kube_real" | "$kube_real"/*) echo "unsafe sandbox kubeconfig: $kubeconfig" >&2; return 1 ;;
   esac
 }
 
