@@ -15,6 +15,10 @@ fail=0
 ok() { echo "ok   $1"; }
 bad() { echo "FAIL $1"; fail=1; }
 
+# Уникальные длительности sleep: pgrep -f не совпадёт с чужими процессами.
+s1=$((20000 + RANDOM))
+s2=$((20000 + RANDOM))
+s3=$((20000 + RANDOM))
 fence='```'
 cat > "$tmp/page.md" <<MD
 # page
@@ -43,11 +47,48 @@ cat; echo done
 ${fence}
 
 ${fence}sh title="sleep.sh"
-sleep 31 & sleep 31
+sleep $s1 & sleep $s1
 ${fence}
 
 ${fence}sh title="override.sh"
 echo RAN; kubectl get pods --context prod
+${fence}
+
+${fence}sh title="ignore-term.sh"
+(trap "" TERM; exec sleep $s2) & wait
+${fence}
+
+${fence}sh title="long.sh"
+sleep $s3 & wait
+${fence}
+
+${fence}sh title="unset.sh"
+unset KUBECONFIG; kubectl config current-context
+${fence}
+
+${fence}sh title="env-i.sh"
+env -i PATH="\$PATH" kubectl config current-context
+${fence}
+
+${fence}sh title="server.sh"
+echo RAN; kubectl get pods --server https://example.invalid
+${fence}
+
+${fence}sh title="unset-form.sh"
+echo RAN; unset KUBECONFIG; kubectl get pods
+${fence}
+
+${fence}sh title="subst.sh"
+x=\$(kubectl version); echo RAN
+${fence}
+
+${fence}sh title="pipe.sh"
+echo RAN | kubectl apply -f -
+${fence}
+
+${fence}sh title="bol.sh"
+echo RAN
+kubectl get pods
 ${fence}
 
 ${fence}sh title="plain.sh"
@@ -116,7 +157,7 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "done" ]; then ok stdin-null; else
 
 K8S_BOX_TIMEOUT=2 run "$tmp/page.md" sleep.sh
 sleep 6
-if [ "$rc" -eq 124 ] && grep -q 'block timed out' "$tmp/err" && ! pgrep -f "sleep 31" >/dev/null; then ok timeout; else bad timeout; fi
+if [ "$rc" -eq 124 ] && grep -q 'block timed out' "$tmp/err" && ! pgrep -f "sleep $s1" >/dev/null; then ok timeout; else bad timeout; fi
 
 run "$tmp/page.md" override.sh
 if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran; then ok override; else bad override; fi
@@ -141,6 +182,45 @@ if [ "$rc" -eq 1 ] && grep -q "not running: reference-test-$$" "$tmp/err" && no_
 
 KUBECONFIG="$tmp/prod.yaml" run "$tmp/page.md" env.sh
 if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "$tmp/kubeconfig" ]; then ok env-kubeconfig-ignored; else bad env-kubeconfig-ignored; fi
+
+for t in subst.sh pipe.sh bol.sh; do
+  fake_kubeconfig prod
+  run "$tmp/page.md" $t
+  if [ "$rc" -eq 1 ] && grep -q 'wrong kubectl context: prod' "$tmp/err" && no_ran; then ok "kubectl-word-$t"; else bad "kubectl-word-$t"; fi
+done
+
+fake_kubeconfig "kind-reference-test-$$"
+run "$tmp/page.md" server.sh
+if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran; then ok override-server; else bad override-server; fi
+run "$tmp/page.md" unset-form.sh
+if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err" && no_ran; then ok override-unset; else bad override-unset; fi
+
+# kind подменён заглушкой, чтобы пройти проверку «кластер запущен»: настоящий кластер тесту не нужен.
+mkdir "$tmp/stub"
+printf '#!/bin/sh\necho "%s"\n' "$K8S_BOX_CLUSTER" > "$tmp/stub/kind"
+chmod +x "$tmp/stub/kind"
+PATH="$tmp/stub:$PATH" run "$tmp/page.md" env-i.sh
+if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/out")" = "kind-$K8S_BOX_CLUSTER" ]; then ok wrapper-env-i; else bad wrapper-env-i; fi
+PATH="$tmp/stub:$PATH" run "$tmp/page.md" unset.sh
+if [ "$rc" -eq 1 ] && grep -q 'block overrides kubeconfig' "$tmp/err"; then ok override-unset-plain; else bad override-unset-plain; fi
+
+K8S_BOX_TIMEOUT=2 run "$tmp/page.md" ignore-term.sh
+sleep 6
+if [ "$rc" -eq 124 ] && ! pgrep -f "sleep $s2" >/dev/null; then ok timeout-kills-descendants; else bad timeout-kills-descendants; fi
+if ! grep -q 'Terminated' "$tmp/err"; then ok timeout-quiet; else bad timeout-quiet; fi
+pkill -KILL -f "sleep $s2" 2>/dev/null
+
+bash "$script" block "$tmp/page.md" long.sh > "$tmp/out" 2> "$tmp/err" &
+bp=$!
+sleep 2
+kill -TERM "$bp"
+wait "$bp" 2>/dev/null
+sleep 2
+if ! pgrep -f "sleep $s3" >/dev/null; then ok signal-forwarded; else bad signal-forwarded; pkill -KILL -f "sleep $s3"; fi
+
+K8S_BOX_KUBECONFIG="$HOME/.kube/config" bash "$script" down > "$tmp/out" 2> "$tmp/err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'unsafe sandbox kubeconfig' "$tmp/err"; then ok unsafe-kubeconfig; else bad unsafe-kubeconfig; fi
 
 if bash "$script" down > "$tmp/out" 2> "$tmp/err"; then ok down-absent; else bad down-absent; fi
 

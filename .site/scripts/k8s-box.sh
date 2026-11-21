@@ -105,7 +105,7 @@ cmd_block() {
   local page="$1" title="$2" body ctx
   body="$(extract_block "$page" "$title")" || exit 1
 
-  if printf '%s\n' "$body" | grep -Eq -- '--context|--kubeconfig|KUBECONFIG='; then
+  if printf '%s\n' "$body" | grep -Eq -- '--context|--kubeconfig|KUBECONFIG=|unset[[:space:]]+KUBECONFIG|-u[[:space:]]+KUBECONFIG|-n[[:space:]]+KUBECONFIG|--(server|token|cluster|user)([=[:space:]]|$)'; then
     echo "block overrides kubeconfig: $title" >&2
     exit 1
   fi
@@ -118,16 +118,22 @@ cmd_block() {
     kind get clusters 2>/dev/null | grep -qx "$cluster" || { echo "not running: $cluster; run make k8s-up" >&2; exit 1; }
   fi
 
-  local stash work rc=0 pid wd
+  local stash work rc=0 pid wd real
   stash="$(mktemp -d)"
   work="$(mktemp -d)"
   printf '%s\n' "$body" > "$stash/block.sh"
+  # kubectl в блоке — обёртка с песочным kubeconfig: unset KUBECONFIG не уводит блок в ~/.kube/config.
+  mkdir "$stash/bin"
+  if real="$(command -v kubectl)"; then
+    printf '#!/bin/sh\nexec %q --kubeconfig %q "$@"\n' "$real" "$kubeconfig" > "$stash/bin/kubectl"
+    chmod +x "$stash/bin/kubectl"
+  fi
   # shellcheck disable=SC2064
   trap "rm -rf -- '$stash' '$work'" EXIT
 
   # Блок — в своей группе процессов (set -m): сторож шлёт TERM, потом KILL всей группе.
   set -m
-  (cd "$work" && KUBECONFIG="$kubeconfig" exec bash "$stash/block.sh" < /dev/null) &
+  (cd "$work" && KUBECONFIG="$kubeconfig" PATH="$stash/bin:$PATH" exec bash "$stash/block.sh" < /dev/null) &
   pid=$!
   set +m
   (
@@ -144,13 +150,17 @@ cmd_block() {
     kill -KILL -- "-$pid" 2>/dev/null || true
   ) &
   wd=$!
-  wait "$pid" || rc=$?
-  kill "$wd" 2>/dev/null || true
-  wait "$wd" 2>/dev/null || true
+  # Сигнал скрипту уходит всей группе блока: блок не остаётся без присмотра.
+  trap 'kill -TERM -- "-$pid" 2>/dev/null; kill "$wd" 2>/dev/null; sleep 1; kill -KILL -- "-$pid" 2>/dev/null; exit 143' INT TERM
+  { wait "$pid"; } 2>/dev/null || rc=$?
   if [ -e "$stash/timed-out" ]; then
+    # Лидер мог выйти по TERM, а потомки — игнорировать его: ждём сторожа, он досылает KILL.
+    { wait "$wd"; } 2>/dev/null || true
     echo "block timed out: $title" >&2
     exit 124
   fi
+  kill "$wd" 2>/dev/null || true
+  { wait "$wd"; } 2>/dev/null || true
   exit "$rc"
 }
 
@@ -162,8 +172,24 @@ cmd_down() {
   rm -f -- "$kubeconfig"
 }
 
+# Песочный kubeconfig не должен лежать в ~/.kube: kind create/delete переписали бы его, а down удалил.
+check_kubeconfig() {
+  local dir path kube
+  dir="$(dirname "$kubeconfig")"
+  [ -d "$dir" ] && dir="$(cd "$dir" && pwd -P)"
+  path="$dir/$(basename "$kubeconfig")"
+  kube="$HOME/.kube"
+  [ -d "$kube" ] && kube="$(cd "$kube" && pwd -P)"
+  case "$path" in
+    "$kube" | "$kube"/*) echo "unsafe sandbox kubeconfig: $kubeconfig" >&2; return 1 ;;
+  esac
+}
+
 [ $# -ge 1 ] || usage
 sub="$1"; shift
+case "$sub" in
+  up | block | down) check_kubeconfig || exit 1 ;;
+esac
 case "$sub" in
   up) cmd_up ;;
   block) cmd_block "$@" ;;
