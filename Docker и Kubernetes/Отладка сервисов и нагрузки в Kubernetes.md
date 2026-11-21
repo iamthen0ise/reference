@@ -169,6 +169,7 @@ namespace "demo-svc" deleted
 ```sh title="stop-no-prestop.sh"
 kubectl delete namespace demo-502 --ignore-not-found --wait --timeout=120s
 kubectl create namespace demo-502
+fail() { echo "timeout: $*" >&2; kill $(jobs -p) 2>/dev/null; kubectl delete namespace demo-502 --wait=false > /dev/null; exit 1; }
 kubectl apply -n demo-502 -f - <<'YAML'
 apiVersion: v1
 kind: Pod
@@ -210,7 +211,7 @@ for _ in $(seq 100); do
   [ -z "$s" ] && { ok=1; break; }
   sleep 0.1
 done
-[ -n "$ok" ] || { echo "timeout: endpoint did not disappear" >&2; exit 1; }
+[ -n "$ok" ] || fail "endpoint did not disappear"
 kubectl wait pod/nohook -n demo-502 --for=delete --timeout=60s
 wait "$logger"
 echo "--- pod log (UTC)"
@@ -223,12 +224,12 @@ namespace/demo-502 created
 pod/nohook created
 service/nohook created
 pod/nohook condition met
-13:05:36 kubectl delete pod
-13:05:36 endpoint: ready=false serving=true terminating=true
-13:05:39 endpoint: none
+13:15:12 kubectl delete pod
+13:15:12 endpoint: ready=false serving=true terminating=true
+13:15:15 endpoint: none
 pod/nohook condition met
 --- pod log (UTC)
-2026-11-21T13:05:38.840357511Z got TERM, shutting down
+2026-11-21T13:15:14.345684264Z got TERM, shutting down
 namespace "demo-502" deleted
 ```
 
@@ -250,6 +251,7 @@ namespace "demo-502" deleted
 ```sh title="throttle.sh"
 kubectl delete namespace demo-cpu --ignore-not-found --wait --timeout=120s
 kubectl create namespace demo-cpu
+fail() { echo "timeout: $*" >&2; kill $(jobs -p) 2>/dev/null; kubectl delete namespace demo-cpu --wait=false > /dev/null; exit 1; }
 kubectl apply -n demo-cpu -f - <<'YAML'
 apiVersion: v1
 kind: Pod
@@ -272,7 +274,7 @@ for _ in $(seq 40); do
   kubectl top pod burner -n demo-cpu --no-headers 2>/dev/null | grep -q . && { ok=1; break; }
   sleep 3
 done
-[ -n "$ok" ] || { echo "timeout: metrics-server returned no data" >&2; exit 1; }
+[ -n "$ok" ] || fail "metrics-server returned no data"
 echo "--- kubectl top pod"
 kubectl top pod burner -n demo-cpu | sed 's/ *$//'
 stat() { kubectl exec burner -n demo-cpu -- grep -E 'nr_periods|nr_throttled' /sys/fs/cgroup/cpu.stat | tr '\n' ' '; echo; }
@@ -286,7 +288,7 @@ for _ in $(seq 40); do
   [ "$(echo "$second" | awk '{ print $2 }')" -ge $((base + 30)) ] && { ok=1; break; }
   sleep 1
 done
-[ -n "$ok" ] || { echo "timeout: nr_periods did not grow" >&2; exit 1; }
+[ -n "$ok" ] || fail "nr_periods did not grow"
 echo "$second"
 echo "--- cpu.max"
 kubectl exec burner -n demo-cpu -- cat /sys/fs/cgroup/cpu.max
@@ -301,8 +303,8 @@ pod/burner condition met
 NAME     CPU(cores)   MEMORY(bytes)
 burner   200m         12Mi
 --- cpu.stat, twice
-nr_periods 157 nr_throttled 157 
-nr_periods 194 nr_throttled 194 
+nr_periods 188 nr_throttled 188 
+nr_periods 225 nr_throttled 225 
 --- cpu.max
 20000 100000
 namespace "demo-cpu" deleted
@@ -330,6 +332,7 @@ namespace "demo-cpu" deleted
 ```sh title="debug.sh"
 kubectl delete namespace demo-debug --ignore-not-found --wait --timeout=120s
 kubectl create namespace demo-debug
+fail() { echo "timeout: $*" >&2; kill $(jobs -p) 2>/dev/null; kubectl delete namespace demo-debug --wait=false > /dev/null; exit 1; }
 kubectl apply -n demo-debug -f - <<'YAML'
 apiVersion: v1
 kind: Pod
@@ -354,7 +357,7 @@ for _ in $(seq 30); do
   [ -n "$s" ] && { ok=1; break; }
   sleep 1
 done
-[ -n "$ok" ] || { echo "timeout: ephemeral container did not finish" >&2; exit 1; }
+[ -n "$ok" ] || fail "ephemeral container did not finish"
 kubectl logs web -n demo-debug -c dbg
 echo "--- containers of the pod"
 kubectl get pod web -n demo-debug -o jsonpath='containers={.spec.containers[*].name} ephemeral={.spec.ephemeralContainers[*].name}{"\n"}'
@@ -367,7 +370,7 @@ for _ in $(seq 40); do
   [ -n "$port" ] && curl -s -o /dev/null "localhost:$port/healthz" && { ok=1; break; }
   sleep 0.5
 done
-[ -n "$ok" ] || { echo "timeout: port-forward did not come up" >&2; kill "$pf"; exit 1; }
+[ -n "$ok" ] || fail "port-forward did not come up"
 curl -s "localhost:$port/"; echo
 kill "$pf"
 wait "$pf" 2>/dev/null
