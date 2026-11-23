@@ -94,7 +94,7 @@ mod3.sleep patched, waited 0.0 s
 
 ### patch("mymodule.asyncio.sleep") подменяет asyncio.sleep для всех
 
-`mymodule.asyncio` — это не копия, а тот самый объект-модуль `asyncio`, один на весь процесс. Поэтому `patch("mymodule.asyncio.sleep")` на самом деле делает `setattr(asyncio, "sleep", mock)`:
+`mymodule.asyncio` — это не копия, а тот самый объект-модуль `asyncio`, один на весь процесс. Поэтому `patch("mymodule.asyncio.sleep")` делает `setattr(asyncio, "sleep", mock)`:
 
 ```python
 # mymodule.py
