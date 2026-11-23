@@ -140,6 +140,16 @@ test('links outside the sidebar do not count', async () => {
   assert.match((await checkDist(dir, OPTS)).join('\n'), /notes\/a/);
 });
 
+test('redirect stub of a renamed note is not required in the sidebar', async () => {
+  const dir = await withNotes(['/reference/notes/', '/reference/notes/new/'], ['new']);
+  await mkdir(join(dir, 'notes/old'), { recursive: true });
+  await writeFile(
+    join(dir, 'notes/old/index.html'),
+    '<!doctype html><title>Redirecting to: /reference/notes/new/</title><meta http-equiv="refresh" content="0;url=/reference/notes/new/"><a href="/reference/notes/new/">x</a>',
+  );
+  assert.deepEqual(await checkDist(dir, OPTS), []);
+});
+
 test('resolveOptions: --vault derives expected counts from the vault', async () => {
   const vault = await mkdtemp(join(tmpdir(), 'vault-'));
   await writeFile(join(vault, 'A.md'), '```mermaid\ng\n```\n> [!note] x\n> [!tip] y\n');

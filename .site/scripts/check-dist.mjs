@@ -164,7 +164,9 @@ export async function checkDist(distDir, { base, mermaid, asides }) {
   // Меню в astro.config.mjs написано вручную: новая заметка, не попавшая в него, недоступна из навигации.
   if (pages.has('notes')) {
     const keys = sidebarKeys(htmls.get(join(root, 'notes', 'index.html')), base_);
-    const notePages = [...pages.keys()].filter((k) => k.startsWith('notes/'));
+    // Заглушки redirects из astro.config.mjs (старые адреса переименованных заметок) в меню не нужны.
+    const isRedirect = (k) => /<meta\b[^>]*\shttp-equiv\s*=\s*["']?refresh/i.test(htmls.get(join(root, k, 'index.html')) ?? '');
+    const notePages = [...pages.keys()].filter((k) => k.startsWith('notes/') && !isRedirect(k));
     if (keys === null) {
       if (notePages.length) problems.push('notes/index.html: sidebar navigation not found');
     } else {
