@@ -32,6 +32,14 @@ x-broker-env: &broker-env
   KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
   KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
 
+x-netem: &netem
+  build: ./netem
+  cap_drop: [ALL]
+  cap_add: [NET_ADMIN]
+  restart: unless-stopped
+  environment:
+    PEER_HOSTS: kafka1,kafka2,kafka3,runner,controller
+
 services:
   # Контроллер отдельно от брокеров: при остановке двух брокеров из трёх кворум KRaft сохраняется,
   # ISR сжимается, и сценарий получает NotEnoughReplicas, а не зависание.
@@ -82,6 +90,28 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9092
     volumes:
       - kafka3-data:/var/lib/kafka/data
+
+  # Агент обрывов связи в сетевом namespace брокера: iptables DROP к выбранным пирам и от них (API на kafkaN:9000).
+  netem1:
+    <<: *netem
+    network_mode: service:kafka1
+    depends_on:
+      kafka1:
+        condition: service_healthy
+
+  netem2:
+    <<: *netem
+    network_mode: service:kafka2
+    depends_on:
+      kafka2:
+        condition: service_healthy
+
+  netem3:
+    <<: *netem
+    network_mode: service:kafka3
+    depends_on:
+      kafka3:
+        condition: service_healthy
 
   kafka-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
