@@ -1,0 +1,32 @@
+[project]
+name = "lab"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = [
+    "E4", "E7", "E9", "F", "I", "B", "UP", "C4", "PERF", "RET", "ANN", "DTZ", "BLE", "ASYNC",
+    "T20", "ERA", "TID252", "PLR2004", "PLR1702", "RUF006", "RUF012",
+    "S101", "S105", "S106", "S110", "S301", "S506", "S602", "S608",
+]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.pylint]
+max-nested-blocks = 3
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101", "S105", "S106"]

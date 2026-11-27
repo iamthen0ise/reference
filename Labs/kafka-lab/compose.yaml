@@ -136,6 +136,14 @@ services:
       timeout: 5s
       retries: 40
 
+  # Раннер сценариев: портов наружу нет, контейнер ждёт; сценарий запускают через docker compose exec runner.
+  runner:
+    build: ./runner
+    restart: unless-stopped
+    volumes:
+      - ./scenarios:/app/scenarios:ro
+      - ./reports:/app/reports
+
 # Именованные тома переживают kill/stop брокера и удаляются только `docker compose down -v`.
 volumes:
   controller-data:
