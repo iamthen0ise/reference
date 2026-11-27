@@ -1,4 +1,4 @@
-.PHONY: init run build check test pglab-up pglab-down kafkalab-up kafkalab-down kafkalab-test check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test linux-up linux-block linux-shell linux-down linux-test k8s-up k8s-block k8s-down k8s-test
+.PHONY: init run build check test pglab-up pglab-down kafkalab-up kafkalab-down kafkalab-test kafkalab-run check-vault check-dist check-browser init-browser sql-up sql-run sql-block sql-bg sql-psql sql-down sql-test linux-up linux-block linux-shell linux-down linux-test k8s-up k8s-block k8s-down k8s-test
 
 PREVIEW_PORT ?= 4329
 PLAYWRIGHT_INSTALL_FLAGS ?=
@@ -73,6 +73,12 @@ kafkalab-down:
 kafkalab-test:
 	cd Labs/kafka-lab/netem && python3 -m unittest -q
 	cd Labs/kafka-lab && docker compose build runner && docker compose run --rm --no-deps runner python -m pytest -q
+
+# Прогон сценария стенда Kafka: make kafkalab-run S=smoke ARGS="--set producer.acks=1".
+kafkalab-run:
+	@test -n "$(S)" || { echo "usage: make kafkalab-run S=<сценарий> [ARGS=\"--set k=v\"]" >&2; exit 2; }
+	cd Labs/kafka-lab && docker compose up -d --build --no-deps --wait runner >/dev/null
+	Labs/kafka-lab/lab run $(S) $(ARGS)
 
 # Прогон демонстраций страниц «Linux» в контейнере с Debian (образ из .site/linux-box).
 linux-up:

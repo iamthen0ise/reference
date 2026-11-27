@@ -1,0 +1,3 @@
+#!/bin/sh
+# Раннер живёт в контейнере runner; интерпретатор — `python -m lab`, отдельной команды `lab` в образе нет.
+exec docker compose -f "$(dirname "$0")/compose.yaml" exec runner python -m lab "$@"

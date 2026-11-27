@@ -61,6 +61,14 @@ class Cluster:
         finally:
             await admin.close()
 
+    async def topics(self) -> list[str]:
+        """Пользовательские топики (без служебных `__...`)."""
+        admin = await self._admin()
+        try:
+            return sorted(t for t in await admin.list_topics() if not t.startswith("__"))
+        finally:
+            await admin.close()
+
     async def layout(self, topic: str) -> dict[int, PartitionState]:
         admin = await self._admin()
         try:

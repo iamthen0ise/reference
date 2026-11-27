@@ -1,0 +1,13 @@
+description: Проверка стенда без сбоев — acks=all, min.insync.replicas=2, ничего не теряется
+article: "[[Продюсер Kafka]]"
+topic:
+  partitions: 3
+  replication: 3
+  configs:
+    min.insync.replicas: 2
+producer:
+  acks: all
+  rate: 50
+  seconds: 10
+observers: [read_committed]
+settle_seconds: 30
