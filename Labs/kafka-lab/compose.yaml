@@ -1,0 +1,114 @@
+# Стенд: Kafka 4.1 (KRaft) — отдельный контроллер и три брокера, kafka-ui на 127.0.0.1:8089.
+# Наружу публикуется только kafka-ui; брокеры и контроллер видны лишь внутри сети compose.
+name: kafka-lab
+
+x-broker: &broker
+  image: apache/kafka:4.1.0
+  restart: unless-stopped
+  depends_on:
+    controller:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+    interval: 3s
+    timeout: 10s
+    retries: 40
+
+x-broker-env: &broker-env
+  CLUSTER_ID: &cluster-id MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_PROCESS_ROLES: broker
+  KAFKA_LISTENERS: PLAINTEXT://:9092
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 100@controller:9093
+  # Топики создаёт раннер явно: автосоздание дало бы топик с RF=1 при опечатке в имени.
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  # Брокер выпадает из ISR через 10 с, а не через 30 с по умолчанию: сценарии не ждут полминуты.
+  KAFKA_REPLICA_LAG_TIME_MAX_MS: "10000"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+
+services:
+  # Контроллер отдельно от брокеров: при остановке двух брокеров из трёх кворум KRaft сохраняется,
+  # ISR сжимается, и сценарий получает NotEnoughReplicas, а не зависание.
+  controller:
+    image: apache/kafka:4.1.0
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: *cluster-id
+      KAFKA_NODE_ID: "100"
+      KAFKA_PROCESS_ROLES: controller
+      KAFKA_LISTENERS: CONTROLLER://:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 100@controller:9093
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    volumes:
+      - controller-data:/var/lib/kafka/data
+    healthcheck:
+      # Порт контроллера говорит только на контроллерном протоколе, поэтому проверяем лишь открытие сокета (/dev/tcp есть в bash, не в sh).
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/9093"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  kafka1:
+    <<: *broker
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+
+  kafka2:
+    <<: *broker
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9092
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+
+  kafka3:
+    <<: *broker
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: "3"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9092
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lab
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+      KAFKA_CLUSTERS_0_READONLY: "false"
+      JAVA_OPTS: -Xmx256m -Xms128m
+    ports:
+      - "127.0.0.1:8089:8080"
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+# Именованные тома переживают kill/stop брокера и удаляются только `docker compose down -v`.
+volumes:
+  controller-data:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
