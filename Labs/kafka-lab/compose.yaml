@@ -136,10 +136,40 @@ services:
       timeout: 5s
       retries: 40
 
+  # Прокси Docker API для раннера: разрешены только список контейнеров и start/stop/restart/kill; create, DELETE, exec и прочее получают 403.
+  # docker.sock смонтирован только сюда. Клиент — только runner. Порт на хост не публикуется.
+  # Не tecnativa/docker-socket-proxy: в v0.5.0 флаги ALLOW_START/STOP/RESTARTS работают только вместе с POST=1, а он открывает create.
+  docker-proxy:
+    image: wollomatic/socket-proxy:1.14.0
+    # Сокет Docker Desktop — root:root 0660, поэтому группа 0 (uid остаётся непривилегированным).
+    user: "65534:0"
+    # На Linux сокет принадлежит root:docker: задай DOCKER_GID (`stat -c %g /var/run/docker.sock`). На Docker Desktop хватает 0.
+    group_add: ["${DOCKER_GID:-0}"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    mem_limit: 64M
+    command:
+      - -loglevel=info
+      - -listenip=0.0.0.0
+      - -allowfrom=runner
+      - -allowGET=/containers/json
+      - -allowPOST=/containers/[0-9a-f]{12,64}/(start|stop|restart|kill)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
   # Раннер сценариев: портов наружу нет, контейнер ждёт; сценарий запускают через docker compose exec runner.
   runner:
     build: ./runner
     restart: unless-stopped
+    environment:
+      DOCKER_PROXY_URL: http://docker-proxy:2375
+      COMPOSE_PROJECT: kafka-lab
+      BOOTSTRAP: kafka1:9092,kafka2:9092,kafka3:9092
+    depends_on:
+      docker-proxy:
+        condition: service_started
     volumes:
       - ./scenarios:/app/scenarios:ro
       - ./reports:/app/reports
