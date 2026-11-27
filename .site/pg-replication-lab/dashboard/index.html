@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>PG replication lag</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, "SF Pro Text", "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); display: inline-block; margin-right: 6px; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  main { padding: 16px 20px; display: grid; gap: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .panel h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 10px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 28px; }
+  .stat .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+  .controls label { color: var(--muted); }
+  button, select { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button.danger:hover { border-color: var(--bad); }
+  input[type=range] { width: 220px; vertical-align: middle; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .replica { border-top: 3px solid var(--border); }
+  .replica.ok { border-top-color: var(--ok); } .replica.warn { border-top-color: var(--warn); } .replica.bad { border-top-color: var(--bad); } .replica.idle { border-top-color: var(--muted); }
+  .replica .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .replica .name { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #21262d; border: 1px solid var(--border); color: var(--muted); margin-left: 4px; }
+  .badge.sync { color: var(--accent); border-color: var(--accent); }
+  .badge.paused { color: var(--warn); border-color: var(--warn); }
+  .badge.down { color: var(--bad); border-color: var(--bad); }
+  .big { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; border-bottom: 1px dashed #21262d; }
+  td:first-child { color: var(--muted); }
+  td:last-child { text-align: right; }
+  .err { color: var(--bad); font-size: 12px; margin-top: 6px; word-break: break-word; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  canvas { width: 100%; height: 220px; display: block; }
+  #toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel); border: 1px solid var(--bad); padding: 8px 14px; border-radius: 6px; display: none; }
+  .netem { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  .netem-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+  .netem input { width: 62px; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; font: inherit; }
+  .netem button { padding: 3px 8px; font-size: 12px; }
+  .badge.netem-on { color: #f778ba; border-color: #f778ba; }
+  .badge.cut { color: var(--bad); border-color: var(--bad); }
+  .ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .ctl button { padding: 3px 9px; font-size: 12px; }
+  .ctl .sep { flex: 1; }
+  button.on { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .45; cursor: default; }
+  button:disabled:hover { border-color: var(--border); }
+  button.pending { opacity: .6; cursor: progress; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PostgreSQL · лаг репликации</h1>
+  <span><span id="live" class="dot"></span><span id="live-text">нет связи</span></span>
+  <span style="margin-left:auto;color:var(--muted)" id="clock"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Primary</h2>
+    <div class="stats">
+      <div class="stat"><div class="v" id="p-tps">—</div><div class="l">транзакций/с</div></div>
+      <div class="stat"><div class="v" id="p-wal">—</div><div class="l">WAL в секунду</div></div>
+      <div class="stat"><div class="v" id="p-lsn">—</div><div class="l">текущий LSN</div></div>
+      <div class="stat"><div class="v" id="p-hb">—</div><div class="l">возраст heartbeat на primary</div></div>
+      <div class="stat"><div class="v" id="p-unflushed">—</div><div class="l">WAL не сброшен на диск</div></div>
+      <div class="stat"><div class="v" id="p-size">—</div><div class="l">размер БД</div></div>
+      <div class="stat"><div class="v" id="p-rows">—</div><div class="l">строк в events (оценка)</div></div>
+      <div class="stat"><div class="v" id="p-active">—</div><div class="l">активных сессий</div></div>
+      <div class="stat"><div class="v" id="p-sync">—</div><div class="l">synchronous_standby_names</div></div>
+    </div>
+    <div class="err" id="p-err"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Нагрузка и сценарии</h2>
+    <div class="controls">
+      <span>
+        <label for="rate">Доп. вставка, строк/с:</label>
+        <input type="range" id="rate" min="0" max="100000" step="1000" value="0">
+        <b id="rate-v">0</b>
+      </span>
+      <span>
+        <label>Залп одной транзакцией:</label>
+        <button data-burst="100000">100k</button>
+        <button data-burst="1000000">1M</button>
+        <button data-burst="3000000">3M</button>
+        <span id="burst-state" style="color:var(--muted)"></span>
+      </span>
+      <span>
+        <label for="sync">Синхронная реплика:</label>
+        <select id="sync"><option value="">нет (все async)</option></select>
+      </span>
+      <button class="danger" id="truncate">TRUNCATE events</button>
+      <label><input type="checkbox" id="log"> лог. шкала графиков</label>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <span>loader: <b id="ld-state">—</b></span>
+      <button data-ld="start">start</button>
+      <button data-ld="stop" class="danger">stop</button>
+    </div>
+    <div class="err" id="load-err"></div>
+    <div class="err" id="ctr-err"></div>
+  </section>
+
+  <section class="grid" id="replicas"></section>
+
+  <section class="grid">
+    <div class="panel">
+      <div class="chart-head"><h2 title="clock_timestamp() − heartbeat.ts на реплике. Включает и остановки самого primary: сравни с возрастом heartbeat на primary">Лаг по heartbeat ⓘ</h2><div class="legend" data-legend></div></div>
+      <canvas id="c-hb"></canvas>
+    </div>
+    <div class="panel">
+      <div class="chart-head"><h2>Отставание replay от primary, байты</h2><div class="legend" data-legend></div></div>
+      <canvas id="c-bytes"></canvas>
+    </div>
+    <div class="panel">
+      <div class="chart-head"><h2>Генерация WAL на primary</h2><div class="legend"><span><i class="swatch" style="background:#58a6ff"></i>WAL/с</span></div></div>
+      <canvas id="c-wal"></canvas>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const WINDOW = 180;
+const COLORS = ['#3fb950', '#58a6ff', '#f778ba', '#d29922', '#a371f7'];
+const history = [];
+const $ = (id) => document.getElementById(id);
+let replicaNames = [];
+let syncSelectReady = false;
+
+// ---------- форматирование ----------
+function fmtBytes(b) {
+  if (b == null) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = Math.abs(b);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (b < 0 ? '-' : '') + (i === 0 ? v.toFixed(0) : v.toFixed(v < 10 ? 2 : 1)) + ' ' + u[i];
+}
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  if (ms < 1) return ms.toFixed(2) + ' ms';
+  if (ms < 1000) return ms.toFixed(ms < 10 ? 1 : 0) + ' ms';
+  if (ms < 60000) return (ms / 1000).toFixed(2) + ' s';
+  return (ms / 60000).toFixed(1) + ' min';
+}
+const fmtNum = (n) => n == null ? '—' : Math.round(n).toLocaleString('ru-RU');
+const level = (ms, bytes) => (ms > 5000 || bytes > 256 * 2 ** 20) ? 'bad' : (ms > 500 || bytes > 16 * 2 ** 20) ? 'warn' : 'ok';
+
+// ---------- API ----------
+async function api(path, body) {
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lab-Request': '1' }, body: JSON.stringify(body || {}) });
+    const data = await r.json();
+    if (!r.ok) toast(data.error || r.statusText);
+  } catch (e) { toast(String(e)); }
+}
+async function pending(btn, promise) {
+  btn.classList.add('pending'); btn.disabled = true;
+  pendingBtns.add(btn);
+  try { await promise; } finally { pendingBtns.delete(btn); btn.classList.remove('pending'); }
+}
+const pendingBtns = new Set();
+function svcAction(service, action, btn) {
+  return pending(btn, api(`/api/services/${service}/${action}`));
+}
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = 'none', 4000);
+}
+
+$('rate').addEventListener('input', (e) => $('rate-v').textContent = fmtNum(+e.target.value));
+$('rate').addEventListener('change', (e) => api('/api/load', { rows_per_sec: +e.target.value }));
+document.querySelectorAll('[data-burst]').forEach(b => b.addEventListener('click', () => api('/api/burst', { rows: +b.dataset.burst })));
+$('sync').addEventListener('change', (e) => api('/api/sync', { standby: e.target.value }));
+$('truncate').addEventListener('click', () => confirm('Очистить таблицу events?') && api('/api/truncate'));
+$('log').addEventListener('change', drawCharts);
+document.querySelectorAll('[data-ld]').forEach(b => b.addEventListener('click', () => svcAction('loader', b.dataset.ld, b)));
+
+// ---------- карточки реплик ----------
+function buildReplicaCards(names) {
+  const root = $('replicas');
+  root.innerHTML = '';
+  names.forEach((name, i) => {
+    const el = document.createElement('div');
+    el.className = 'panel replica';
+    el.id = 'r-' + name;
+    el.innerHTML = `
+      <div class="head">
+        <div class="name"><i class="swatch" style="background:${COLORS[i % COLORS.length]}"></i>${name}<span class="badges"></span></div>
+        <button data-action>пауза replay</button>
+      </div>
+      <div class="ctl">
+        <button data-svc="stop" class="danger">stop</button>
+        <button data-svc="kill" class="danger">kill</button>
+        <button data-svc="start">start</button>
+        <button data-svc="restart">restart</button>
+        <span class="sep"></span>
+        <button data-partition title="разорвать сеть primary ↔ реплика (iptables DROP в обе стороны)">обрыв связи</button>
+      </div>
+      <div class="big" data-f="hb">—<small>heartbeat</small></div>
+      <table>
+        <tr><td>replay отстаёт (байты)</td><td data-f="replay_bytes"></td></tr>
+        <tr><td>отправлено / записано / сброшено</td><td data-f="swf"></td></tr>
+        <tr><td>write / flush / replay lag</td><td data-f="lags"></td></tr>
+        <tr><td>принято, но не применено</td><td data-f="backlog"></td></tr>
+        <tr><td>последняя применённая транзакция</td><td data-f="age"></td></tr>
+        <tr><td>recovery_min_apply_delay</td><td data-f="delay"></td></tr>
+        <tr><td>WAL держит слот</td><td data-f="slot"></td></tr>
+        <tr><td>replay LSN</td><td data-f="lsn"></td></tr>
+      </table>
+      <div class="netem">
+        <b>netem</b> на трафик primary → ${name}: <span data-f="netem"></span>
+        <div class="netem-row">
+          <label>delay <input data-n="delay_ms" type="number" min="0" max="5000" placeholder="0"> ms</label>
+          <label>± <input data-n="jitter_ms" type="number" min="0" max="5000" placeholder="0"> ms</label>
+          <label>loss <input data-n="loss_pct" type="number" min="0" max="100" step="0.1" placeholder="0"> %</label>
+          <label>rate <input data-n="rate_mbit" type="number" min="0" max="10000" step="0.1" placeholder="∞"> Mbit/s</label>
+        </div>
+        <div class="netem-row">
+          <button data-netem="apply">применить</button>
+          <button data-netem="reset">сбросить</button>
+          <span>пресеты:</span>
+          <button data-preset='{"delay_ms":50,"jitter_ms":10}'>50±10 ms</button>
+          <button data-preset='{"delay_ms":300}'>300 ms</button>
+          <button data-preset='{"delay_ms":1000}'>1 s</button>
+          <button data-preset='{"rate_mbit":5}'>5 Mbit/s</button>
+          <button data-preset='{"loss_pct":5}'>loss 5%</button>
+        </div>
+      </div>
+      <div class="err" data-f="err"></div>`;
+    const netemInputs = [...el.querySelectorAll('[data-n]')];
+    const sendNetem = (params) => {
+      netemInputs.forEach(i => i.value = params[i.dataset.n] || '');
+      api(`/api/replicas/${name}/netem`, params);
+    };
+    const readNetem = () => Object.fromEntries(netemInputs.map(i => [i.dataset.n, +i.value || 0]));
+    el.querySelector('[data-netem="apply"]').addEventListener('click', () => sendNetem(readNetem()));
+    el.querySelector('[data-netem="reset"]').addEventListener('click', () => sendNetem({}));
+    el.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => sendNetem(JSON.parse(b.dataset.preset))));
+    const CONFIRM = { stop: `Остановить ${name} (SIGTERM, до 10 с)?`, kill: `Убить ${name} (SIGKILL)? Сам не поднимется, нужен start.` };
+    el.querySelectorAll('[data-svc]').forEach(b => b.addEventListener('click', () => {
+      const act = b.dataset.svc;
+      if (CONFIRM[act] && !confirm(CONFIRM[act])) return;
+      svcAction(name, act, b);
+    }));
+    el.querySelector('[data-partition]').addEventListener('click', (e) => {
+      const b = e.currentTarget;
+      pending(b, api(`/api/replicas/${name}/partition`, { enabled: b.dataset.on !== 'true' }));
+    });
+    el.querySelector('[data-action]').addEventListener('click', (e) => {
+      const action = e.target.dataset.paused === 'true' ? 'resume' : 'pause';
+      api(`/api/replicas/${name}/${action}`);
+    });
+    root.appendChild(el);
+  });
+
+  const sel = $('sync');
+  names.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n + ' (sync)'; sel.appendChild(o); });
+  syncSelectReady = true;
+
+  const legend = names.map((n, i) => `<span><i class="swatch" style="background:${COLORS[i % COLORS.length]}"></i>${n}</span>`).join('');
+  document.querySelectorAll('[data-legend]').forEach(l => l.innerHTML = legend);
+}
+
+function renderReplica(r, netem, containers) {
+  const el = $('r-' + r.name);
+  const f = (k) => el.querySelector(`[data-f="${k}"]`);
+  const p = r.from_primary || {};
+  const l = r.local || {};
+  const paused = l.pause_state && l.pause_state !== 'not paused';
+  const c = containers && !containers.error ? containers[r.name] : null;
+  const cstate = c ? c.state : null;
+  // Docker-состояния: exited/created/dead — остановлен; restarting, paused, missing показываем как есть.
+  const notRunning = !!c && cstate !== 'running';
+  const stopped = !!c && ['exited', 'created', 'dead'].includes(cstate);
+  const CSTATE_RU = { restarting: 'перезапускается', paused: 'на паузе (docker pause)', missing: 'контейнер не найден' };
+  const down = !!r.error || !r.from_primary;
+
+  const hb = l.heartbeat_lag_ms;
+  f('hb').innerHTML = `${fmtMs(hb)}<small>heartbeat</small>`;
+  f('replay_bytes').textContent = fmtBytes(p.replay_lag_bytes);
+  f('swf').textContent = [p.sent_lag_bytes, p.write_lag_bytes, p.flush_lag_bytes].map(fmtBytes).join(' / ');
+  f('lags').textContent = [p.write_lag_ms, p.flush_lag_ms, p.replay_lag_ms].map(fmtMs).join(' / ');
+  f('backlog').textContent = fmtBytes(l.apply_backlog_bytes);
+  f('age').textContent = l.last_replay_age_ms == null ? '—' : fmtMs(l.last_replay_age_ms) + ' назад';
+  f('delay').textContent = l.apply_delay || '—';
+  f('slot').textContent = r.slot ? fmtBytes(r.slot.retained_bytes) + (r.slot.active ? '' : ' (слот не активен)') : '—';
+  f('lsn').textContent = l.replay_lsn || '—';
+  f('err').textContent = stopped ? `контейнер остановлен (${c.status || cstate})`
+    : notRunning ? `контейнер: ${CSTATE_RU[cstate] || cstate}${c.status ? ' (' + c.status + ')' : ''}`
+    : r.error || (!r.from_primary ? 'нет в pg_stat_replication на primary' : '');
+  f('err').classList.toggle('muted', notRunning);
+
+  const badges = [];
+  if (p.sync_state) badges.push(`<span class="badge ${p.sync_state === 'sync' ? 'sync' : ''}">${p.sync_state}</span>`);
+  if (p.state && p.state !== 'streaming') badges.push(`<span class="badge">${p.state}</span>`);
+  if (paused) badges.push(`<span class="badge paused">${l.pause_state}</span>`);
+  const n = netem && netem.replicas ? netem.replicas[r.name] : null;
+  f('netem').textContent = !netem ? 'агент недоступен' : netem.error ? 'ошибка: ' + netem.error : describeNetem(n);
+  if (n && !el.dataset.netemFilled) {
+    el.querySelectorAll('[data-n]').forEach(i => i.value = n[i.dataset.n] || '');
+    el.dataset.netemFilled = '1';
+  }
+  if (n && n.active) badges.push(`<span class="badge netem-on">netem</span>`);
+  const part = n && n.partitioned;
+  if (notRunning) badges.push(`<span class="badge down">${cstate}</span>`);
+  if (part) badges.push(`<span class="badge cut">${n.partition_pending ? 'обрыв (ждёт IP реплики)' : 'обрыв'}</span>`);
+  if (down && !notRunning) badges.push(`<span class="badge down">${r.error ? 'недоступна' : 'не стримит'}</span>`);
+  el.querySelector('.badges').innerHTML = badges.join('');
+
+  const btn = el.querySelector('[data-action]');
+  btn.dataset.paused = String(!!paused);
+  btn.textContent = paused ? 'возобновить replay' : 'пауза replay';
+  btn.disabled = !!r.error || notRunning;
+
+  const cbtn = (a) => el.querySelector(`[data-svc="${a}"]`);
+  const known = !!c;
+  const canStop = known && (cstate === 'running' || cstate === 'restarting' || cstate === 'paused');
+  const set = (b, dis) => { if (!pendingBtns.has(b)) b.disabled = dis; };
+  set(cbtn('stop'), !canStop);
+  set(cbtn('kill'), !canStop);
+  set(cbtn('start'), !known || cstate === 'running' || cstate === 'paused' || cstate === 'missing');
+  set(cbtn('restart'), !known || cstate === 'missing');
+  const pb = el.querySelector('[data-partition]');
+  pb.dataset.on = String(!!part);
+  pb.classList.toggle('on', !!part);
+  pb.textContent = part ? 'восстановить связь' : 'обрыв связи';
+  set(pb, !n);
+
+  el.classList.remove('ok', 'warn', 'bad', 'idle');
+  // Остановленный контейнер — не ошибка: нейтральная рамка вместо красной.
+  el.classList.add(notRunning ? 'idle' : down ? 'bad' : level(hb || 0, p.replay_lag_bytes || 0));
+}
+
+function renderPrimary(s) {
+  const p = s.primary || {};
+  $('p-tps').textContent = fmtNum(p.tps);
+  $('p-wal').textContent = p.wal_bytes_per_sec == null ? '—' : fmtBytes(p.wal_bytes_per_sec);
+  $('p-lsn').textContent = p.lsn || '—';
+  $('p-hb').textContent = fmtMs(p.heartbeat_age_ms);
+  $('p-unflushed').textContent = fmtBytes(p.wal_unflushed_bytes);
+  $('p-size').textContent = fmtBytes(p.db_size);
+  $('p-rows').textContent = fmtNum(p.events_rows);
+  $('p-active').textContent = fmtNum(p.active);
+  $('p-sync').textContent = p.sync_standby_names || "''";
+  $('p-err').textContent = p.error || '';
+
+  if (syncSelectReady && document.activeElement !== $('sync') && p.sync_standby_names !== undefined) {
+    const m = /\(([^)]+)\)/.exec(p.sync_standby_names || '');
+    $('sync').value = m ? m[1].trim() : '';
+  }
+
+  const ld = s.loader || {};
+  if (document.activeElement !== $('rate')) { $('rate').value = ld.rows_per_sec || 0; $('rate-v').textContent = fmtNum(ld.rows_per_sec); }
+  const b = ld.burst || {};
+  $('burst-state').textContent = b.running ? `идёт залп ${fmtNum(b.rows)} строк…`
+    : b.error ? `ошибка: ${b.error}` : b.seconds != null ? `последний: ${fmtNum(b.rows)} строк за ${b.seconds} s` : '';
+  $('load-err').textContent = ld.error ? 'вставка: ' + ld.error : '';
+
+  const cs = s.containers;
+  const lc = cs && !cs.error ? cs.loader : null;
+  $('ctr-err').textContent = cs && cs.error ? 'контейнеры: ' + cs.error : '';
+  $('ld-state').textContent = lc ? (lc.state === 'running' ? 'работает' : `${lc.state}${lc.status ? ' (' + lc.status + ')' : ''}`) : '—';
+  const lset = (a, dis) => { const b = document.querySelector(`[data-ld="${a}"]`); if (!pendingBtns.has(b)) b.disabled = dis; };
+  lset('start', !lc || lc.state === 'running' || lc.state === 'missing');
+  lset('stop', !lc || lc.state !== 'running');
+}
+
+function describeNetem(n) {
+  if (!n || !n.active) return 'выключен';
+  const parts = [];
+  if (n.delay_ms) parts.push(`delay ${n.delay_ms}${n.jitter_ms ? '±' + n.jitter_ms : ''} ms`);
+  if (n.loss_pct) parts.push(`loss ${n.loss_pct}%`);
+  if (n.rate_mbit) parts.push(`rate ${n.rate_mbit} Mbit/s`);
+  return parts.join(', ') + (n.ip ? ` (→ ${n.ip})` : ' (IP реплики не найден)');
+}
+
+// ---------- графики ----------
+function drawChart(canvas, series, fmt) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const useLog = $('log').checked;
+  const tf = (v) => useLog ? Math.log10(1 + Math.max(0, v)) : v;
+  let max = 0;
+  series.forEach(s => s.points.forEach(v => { if (v != null) max = Math.max(max, tf(v)); }));
+  if (max <= 0) max = 1;
+  max *= 1.1;
+
+  const padL = 70, padR = 8, padT = 8, padB = 20;
+  const pw = w - padL - padR, ph = h - padT - padB;
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.fillStyle = '#8b949e'; ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + ph - (ph * i / 4);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+    const tv = max * i / 4;
+    const v = useLog ? Math.pow(10, tv) - 1 : tv;
+    ctx.textAlign = 'right'; ctx.fillText(fmt(v), padL - 6, y + 4);
+  }
+  ctx.textAlign = 'left'; ctx.fillText(`−${WINDOW} s`, padL, h - 4);
+  ctx.textAlign = 'right'; ctx.fillText('сейчас', w - padR, h - 4);
+
+  series.forEach(s => {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.8; ctx.beginPath();
+    let pen = false;
+    const offset = WINDOW - s.points.length;
+    s.points.forEach((v, i) => {
+      if (v == null) { pen = false; return; }
+      const x = padL + pw * (offset + i) / (WINDOW - 1);
+      const y = padT + ph - ph * tf(v) / max;
+      pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      pen = true;
+    });
+    ctx.stroke();
+  });
+}
+
+function drawCharts() {
+  const perReplica = (get) => replicaNames.map((name, i) => ({
+    color: COLORS[i % COLORS.length],
+    points: history.map(s => { const r = s.replicas.find(x => x.name === name); return r ? get(r) : null; }),
+  }));
+  drawChart($('c-hb'), perReplica(r => r.local ? r.local.heartbeat_lag_ms : null), fmtMs);
+  drawChart($('c-bytes'), perReplica(r => r.from_primary ? r.from_primary.replay_lag_bytes : null), fmtBytes);
+  drawChart($('c-wal'), [{ color: '#58a6ff', points: history.map(s => s.primary ? s.primary.wal_bytes_per_sec : null) }], fmtBytes);
+}
+window.addEventListener('resize', drawCharts);
+
+// ---------- поток ----------
+function connect() {
+  const es = new EventSource('/events');
+  es.onopen = () => { $('live').classList.add('live'); $('live-text').textContent = 'онлайн'; };
+  es.onerror = () => { $('live').classList.remove('live'); $('live-text').textContent = 'переподключение…'; };
+  es.onmessage = (ev) => {
+    const s = JSON.parse(ev.data);
+    const names = s.replicas.map(r => r.name);
+    if (names.join() !== replicaNames.join()) { replicaNames = names; buildReplicaCards(names); }
+    history.push(s);
+    if (history.length > WINDOW) history.shift();
+    $('clock').textContent = new Date(s.ts * 1000).toLocaleTimeString('ru-RU');
+    renderPrimary(s);
+    s.replicas.forEach(r => renderReplica(r, s.netem, s.containers));
+    drawCharts();
+  };
+}
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,182 @@
+# Стенд: PostgreSQL primary + 3 потоковые реплики, нагрузка pgbench и дашборд лага репликации.
+# Пароли — только для локального стенда, порты слушают 127.0.0.1.
+name: pg-replication-lab
+
+x-replica: &replica
+  image: postgres:17.6
+  user: postgres
+  entrypoint: ["/replica-entrypoint.sh"]
+  restart: unless-stopped
+  depends_on:
+    primary:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "lab"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+
+x-replica-env: &replica-env
+  PRIMARY_HOST: primary
+  REPL_USER: replicator
+  REPL_PASSWORD: ${REPL_PASSWORD:-replicator}
+  PGDATA: /var/lib/postgresql/data/pgdata
+
+services:
+  primary:
+    image: postgres:17.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: lab
+      REPL_PASSWORD: ${REPL_PASSWORD:-replicator}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - cluster_name=primary
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - wal_keep_size=1GB
+      - -c
+      - max_wal_size=4GB
+      # Обрыв связи (iptables DROP) primary замечает через wal_sender_timeout; без него ждал бы ~час keepalive TCP.
+      - -c
+      - wal_sender_timeout=10s
+      # Задержка netem ограничена 5 с (меньше этих таймаутов), иначе репликация рвётся по таймауту, а не из-за задержки.
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+      - ./primary/init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      # По TCP: во время initdb временный сервер слушает только сокет, и проверка не пройдёт раньше времени.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "lab"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  replica1:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      REPLICA_NAME: replica1
+    volumes:
+      - replica1-data:/var/lib/postgresql/data
+      - ./replica/entrypoint.sh:/replica-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:15433:5432"
+
+  replica2:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      REPLICA_NAME: replica2
+    volumes:
+      - replica2-data:/var/lib/postgresql/data
+      - ./replica/entrypoint.sh:/replica-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:15434:5432"
+
+  # Отложенная реплика: WAL получает сразу, а применяет через REPLICA3_APPLY_DELAY.
+  replica3:
+    <<: *replica
+    command: ["-c", "recovery_min_apply_delay=${REPLICA3_APPLY_DELAY:-5s}"]
+    environment:
+      <<: *replica-env
+      REPLICA_NAME: replica3
+    volumes:
+      - replica3-data:/var/lib/postgresql/data
+      - ./replica/entrypoint.sh:/replica-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:15435:5432"
+
+  # Фоновая OLTP-нагрузка: pgbench tpcb-like + вставки в events.
+  loader:
+    image: postgres:17.6
+    entrypoint: ["/loader/run.sh"]
+    restart: unless-stopped
+    environment:
+      PGHOST: primary
+      PGUSER: postgres
+      PGDATABASE: lab
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SCALE: ${LOADER_SCALE:-20}
+      CLIENTS: ${LOADER_CLIENTS:-4}
+      RATE: ${LOADER_RATE:-300}
+    volumes:
+      - ./loader:/loader:ro
+    depends_on:
+      primary:
+        condition: service_healthy
+
+  # tc netem в сетевом namespace primary: задерживает исходящий трафик primary (поток WAL) к выбранной реплике.
+  netem:
+    build: ./netem
+    network_mode: service:primary
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    restart: unless-stopped
+    environment:
+      REPLICA_HOSTS: replica1,replica2,replica3
+    depends_on:
+      primary:
+        condition: service_healthy
+
+  # Единственный контейнер с docker.sock. Regex-прокси (wollomatic/socket-proxy) пропускает только:
+  #   GET  /containers/json                                 — список контейнеров;
+  #   POST /containers/<id>/(start|stop|restart|kill)       — управление.
+  # create, DELETE, exec и прочее получают 403. Клиент — только dashboard. Порт на хост не публикуется.
+  # Не tecnativa/docker-socket-proxy: в v0.5.0 флаги ALLOW_START/STOP/RESTARTS работают только вместе с POST=1,
+  # а он открывает create и прочие записи. Флаг :ro на сокете от записи через Docker API не защищает.
+  docker-proxy:
+    image: wollomatic/socket-proxy:1.14.0
+    # Сокет Docker Desktop — root:root 0660, поэтому группа 0 (uid остаётся непривилегированным).
+    user: "65534:0"
+    # На Linux сокет принадлежит root:docker: задай DOCKER_GID (`stat -c %g /var/run/docker.sock`). На Docker Desktop хватает 0.
+    group_add: ["${DOCKER_GID:-0}"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    mem_limit: 64M
+    command:
+      - -loglevel=info
+      - -listenip=0.0.0.0
+      - -allowfrom=dashboard
+      - -allowGET=/containers/json
+      - -allowPOST=/containers/[0-9a-f]{12,64}/(start|stop|restart|kill)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    environment:
+      PRIMARY_HOST: primary
+      REPLICA_HOSTS: replica1,replica2,replica3
+      PG_USER: postgres
+      PG_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PG_DB: lab
+      NETEM_URL: http://primary:9000
+      DOCKER_PROXY_URL: http://docker-proxy:2375
+      COMPOSE_PROJECT: pg-replication-lab
+    ports:
+      - "127.0.0.1:8088:8080"
+    depends_on:
+      primary:
+        condition: service_healthy
+      docker-proxy:
+        condition: service_started
+
+volumes:
+  primary-data:
+  replica1-data:
+  replica2-data:
+  replica3-data:

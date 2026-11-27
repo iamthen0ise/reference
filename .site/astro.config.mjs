@@ -80,7 +80,7 @@ const sidebar = [
             label: 'PostgreSQL',
             items: pages('Бэкенд/Базы данных/PostgreSQL', [
               'PostgreSQL', 'Нормализация', 'Транзакции и уровни изоляции', 'Индексы', 'EXPLAIN', 'Миграции без простоя',
-              'JSON и JSONB', 'Блокировки', 'Эксплуатация PostgreSQL',
+              'JSON и JSONB', 'Блокировки', 'Эксплуатация PostgreSQL', 'Тестовый стенд',
             ]),
           },
           {
