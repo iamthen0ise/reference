@@ -129,7 +129,7 @@ const sidebar = [
   },
   { label: 'Linux', items: pages('Linux', ['Linux', 'Процессы в Linux', 'Сигналы в Linux', 'Память в Linux', 'Файлы и дескрипторы', 'Ввод-вывод и сеть', 'Контейнеры изнутри']) },
   { label: 'Docker и Kubernetes', items: pages('Docker и Kubernetes', ['Docker и Kubernetes', 'Образы Docker', 'Docker на практике', 'Объекты Kubernetes', 'Конфигурация и нагрузки в Kubernetes', 'Деплой в Kubernetes', 'Ресурсы и остановка в Kubernetes', 'Отладка в Kubernetes', 'Отладка сервисов и нагрузки в Kubernetes']) },
-  { label: 'Labs', items: pages('Labs', ['Labs', 'Стенд репликации PostgreSQL']) },
+  { label: 'Labs', items: pages('Labs', ['Labs', 'Стенд репликации PostgreSQL', 'Стенд репликации Kafka']) },
 ];
 
 export default defineConfig({
