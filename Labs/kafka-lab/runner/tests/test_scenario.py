@@ -168,3 +168,12 @@ def test_effective_settings_flat() -> None:
     assert flat["topic.replication"] == 3
     assert flat["observers"] == ("read_committed",)
     assert flat["settle_seconds"] == 30
+
+
+def test_app_retries_default_parsed_and_validated() -> None:
+    assert load_scenario("d", MINIMAL, []).producer.app_retries == 0
+    text = MINIMAL.replace("seconds: 5}", "seconds: 5, app_retries: 3}")
+    assert load_scenario("d", text, []).producer.app_retries == 3
+    assert load_scenario("d", MINIMAL, ["producer.app_retries=2"]).producer.app_retries == 2
+    with pytest.raises(ScenarioError, match="producer.app_retries"):
+        load_scenario("d", MINIMAL, ["producer.app_retries=-1"])

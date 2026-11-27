@@ -128,3 +128,17 @@ def test_visibility_median_of_even_count() -> None:
     acks = [ack(1, t=0.0), ack(2, t=0.0)]
     v = visibility("o", acks, set(), [rec(1, t=0.1), rec(2, t=0.3)], log=[rec(1), rec(2)])
     assert v.delay_p50_ms is not None and abs(v.delay_p50_ms - 200) < 1e-6
+
+
+def test_retried_seq_acked_after_errors_is_neither_lost_nor_unacked() -> None:
+    log = [Seen(seq=0, partition=0, offset=0, t=1.0), Seen(seq=0, partition=0, offset=1, t=2.0)]
+    result = tally(
+        1,
+        [Ack(seq=0, partition=0, offset=1, t=2.0)],
+        set(),
+        [SendError(0, "TimeoutError", 1.0)],
+        log,
+        set(),
+    )
+    assert result.duplicated == {0: 2} and not result.lost and not result.present_unacked
+    assert result.errors == {"TimeoutError": 1}

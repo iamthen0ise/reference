@@ -25,6 +25,7 @@ PRODUCER_KEYS = (
     "batch",
     "request_timeout_ms",
     "transactional",
+    "app_retries",
 )
 ACKS = ("0", "1", "all")
 OBSERVERS = ("read_committed", "read_uncommitted")
@@ -64,6 +65,7 @@ class ProducerSpec:
     batch: int
     request_timeout_ms: int
     transactional: TxSpec | None
+    app_retries: int = 0  # повторы send того же seq приложением после ошибки отправки
 
 
 @dataclass(frozen=True)
@@ -223,6 +225,7 @@ def _parse_producer(raw: object) -> ProducerSpec:
             "producer.request_timeout_ms",
         ),
         transactional=_parse_tx(section.get("transactional")),
+        app_retries=_int(section.get("app_retries", 0), "producer.app_retries", minimum=0),
     )
 
 
@@ -315,6 +318,7 @@ def effective_settings(s: Scenario) -> dict[str, object]:
         "producer.seconds": p.seconds,
         "producer.batch": p.batch,
         "producer.request_timeout_ms": p.request_timeout_ms,
+        "producer.app_retries": p.app_retries,
         "producer.transactional": None if p.transactional is None else p.transactional.abort_every,
         "topic.partitions": s.topic.partitions,
         "topic.replication": s.topic.replication,
