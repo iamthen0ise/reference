@@ -11,3 +11,15 @@
   --sl-font: 'Inter', system-ui, sans-serif;
   --sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
+
+/* Строки «Рядом: A · B · C» столбиком (src/plugins/rehype-link-lists.mjs): метка вплотную к списку. */
+.sl-markdown-content .link-list > ul {
+  margin-top: 0.25rem;
+}
+.sl-markdown-content .link-list-label {
+  font-weight: 600;
+  color: var(--sl-color-white);
+}
+.sl-markdown-content ul.link-list {
+  margin-top: 0.15rem;
+}

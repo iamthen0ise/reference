@@ -1,0 +1,54 @@
+---
+import StarlightPageTitle from '@astrojs/starlight/components/PageTitle.astro';
+
+// Те же «назад / вперёд», что в подвале (Starlight Pagination), но одной строкой под заголовком.
+const { dir, pagination } = Astro.locals.starlightRoute;
+const { prev, next } = pagination;
+const back = dir === 'rtl' ? '→' : '←';
+const forward = dir === 'rtl' ? '←' : '→';
+---
+
+<StarlightPageTitle {...Astro.props} />
+{(prev || next) && (
+  <nav class="top-pagination print:hidden" dir={dir} aria-label="Соседние страницы">
+    {prev && (
+      <a href={prev.href} rel="prev" title={Astro.locals.t('page.previousLink')}>
+        <span aria-hidden="true">{back}</span> <span class="label">{prev.label}</span>
+      </a>
+    )}
+    {next && (
+      <a href={next.href} rel="next" title={Astro.locals.t('page.nextLink')}>
+        <span class="label">{next.label}</span> <span aria-hidden="true">{forward}</span>
+      </a>
+    )}
+  </nav>
+)}
+
+<style>
+  .top-pagination {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-sm);
+  }
+  a {
+    display: inline-flex;
+    gap: 0.35rem;
+    max-width: 48%;
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+  }
+  a:hover {
+    color: var(--sl-color-white);
+  }
+  [rel='next'] {
+    margin-inline-start: auto;
+    text-align: end;
+  }
+  .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+</style>

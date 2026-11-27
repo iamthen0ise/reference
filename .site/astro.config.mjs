@@ -4,6 +4,7 @@ import starlightObsidian from 'starlight-obsidian';
 import { satteri } from '@astrojs/markdown-satteri';
 import { STARLIGHT_IGNORE } from './scripts/vault-ignore.mjs';
 import rehypeBaseLinks from './src/plugins/rehype-base-links.mjs';
+import rehypeLinkLists from './src/plugins/rehype-link-lists.mjs';
 
 const base = '/reference';
 
@@ -144,7 +145,8 @@ export default defineConfig({
   },
   markdown: {
     // Astro 7 рендерит markdown через Sätteri; starlight-obsidian пишет ссылки /notes/... без base.
-    processor: satteri({ hastPlugins: [rehypeBaseLinks({ base })] }),
+    // rehypeLinkLists выводит строки «Рядом: A · B · C» столбиком.
+    processor: satteri({ hastPlugins: [rehypeBaseLinks({ base }), rehypeLinkLists()] }),
   },
   integrations: [
     starlight({
@@ -152,7 +154,11 @@ export default defineConfig({
       locales: { root: { label: 'Русский', lang: 'ru' } },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/base.css', './src/styles/palettes.css', './src/styles/mobile.css'],
-      components: { ThemeSelect: './src/components/ThemeSelect.astro' },
+      components: {
+        ThemeSelect: './src/components/ThemeSelect.astro',
+        // Под заголовком — компактные «назад / вперёд», как в подвале.
+        PageTitle: './src/components/PageTitle.astro',
+      },
       head: [{ tag: 'script', content: paletteScript }],
       plugins: [
         starlightObsidian({
