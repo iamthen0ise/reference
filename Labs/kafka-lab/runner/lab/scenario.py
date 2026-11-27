@@ -235,6 +235,10 @@ def _parse_observers(raw: object) -> tuple[Any, ...]:
     for item in raw:
         if item not in OBSERVERS:
             raise ScenarioError(f"observers: допустимо {_allowed(OBSERVERS)}, получено {item!r}")
+    if len(set(raw)) != len(raw):
+        raise ScenarioError(
+            f"observers: повтор наблюдателя в {raw!r}, у каждого уровня изоляции один журнал"
+        )
     return tuple(raw)
 
 

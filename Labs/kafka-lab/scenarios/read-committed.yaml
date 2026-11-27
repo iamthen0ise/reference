@@ -1,7 +1,7 @@
 description: >-
   read_committed: откаченные транзакции видит read_uncommitted и не видит read_committed. Каждая третья транзакция откатывается.
   Незакрытая транзакция (hang_transaction) держит LSO: read_committed-консьюмер не видит и закоммиченное после неё, пока брокер не
-  прервёт её по таймауту: hang_transaction задаёт transaction.timeout.ms зависшего продюсера (runner/lab/producer.py:221) равным своему значению, 15 с;
+  прервёт её по таймауту: hang_transaction задаёт transaction.timeout.ms зависшего продюсера (функция hang_transaction в runner/lab/producer.py) равным своему значению, 15 с;
   брокер проверяет просроченные транзакции раз в 10 с, поэтому снятие занимает 15–25 с. Смотри видимость двух наблюдателей.
 article: "[[Порядок событий]]"
 topic:

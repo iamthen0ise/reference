@@ -107,7 +107,10 @@ def visibility(
     observed: list[Seen],
     log: list[Seen],
 ) -> Visibility:
-    """Что и когда увидел наблюдатель; задержка — первое наблюдение минус первое подтверждение."""
+    """Что и когда увидел наблюдатель; задержка — первое наблюдение минус первое подтверждение.
+
+    Откаченные записи в «пропавшие» не входят: их и не должно быть в логе, они уже в aborted_seen.
+    """
     first_seen: dict[int, float] = {}
     for rec in observed:
         if rec.seq not in first_seen or rec.t < first_seen[rec.seq]:
@@ -124,5 +127,7 @@ def visibility(
         aborted_seen=sum(1 for seq in first_seen if seq in aborted),
         delay_p50_ms=_median(delays) if delays else None,
         delay_max_ms=max(delays) if delays else None,
-        vanished=tuple(sorted(seq for seq in first_seen if seq not in in_log)),
+        vanished=tuple(
+            sorted(seq for seq in first_seen if seq not in in_log and seq not in aborted)
+        ),
     )

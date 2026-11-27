@@ -109,6 +109,7 @@ def test_visibility_aborted_seen_by_uncommitted() -> None:
     )
     assert v.seen == 2
     assert v.aborted_seen == 1
+    assert v.vanished == ()
 
 
 def test_visibility_first_observation_and_negative_delay_kept() -> None:
@@ -118,7 +119,7 @@ def test_visibility_first_observation_and_negative_delay_kept() -> None:
 
 
 def test_visibility_without_delays_gives_none() -> None:
-    v = visibility("o", [], {1}, [rec(1, t=1.0)], log=[])
+    v = visibility("o", [], set(), [rec(1, t=1.0)], log=[])
     assert v.delay_p50_ms is None
     assert v.delay_max_ms is None
     assert v.vanished == (1,)

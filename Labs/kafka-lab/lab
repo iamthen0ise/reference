@@ -1,4 +1,5 @@
 #!/bin/sh
 set -eu
 # Раннер живёт в контейнере runner; интерпретатор — `python -m lab`, отдельной команды `lab` в образе нет.
-exec docker compose -f "$(dirname "$0")/compose.yaml" exec runner python -m lab "$@"
+# Запуск от uid хозяина: на Linux каталог reports/ принадлежит ему, и пользователь образа (10001) писать туда не может.
+exec docker compose -f "$(dirname "$0")/compose.yaml" exec --user "$(id -u):$(id -g)" runner python -m lab "$@"

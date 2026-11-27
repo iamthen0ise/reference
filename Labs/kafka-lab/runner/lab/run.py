@@ -237,7 +237,7 @@ async def run_scenario(
     *,
     clients: Clients = Clients(),  # noqa: B008 — неизменяемый набор функций
     reports_dir: Path = REPORTS_DIR,
-) -> Path:
+) -> Path | None:
     producer.check_producer(s.producer)  # до любого обращения к кластеру
     ctx = _Ctx(s, deps, out, clients, Journal())
     ctx.t0 = deps.clock()
@@ -329,19 +329,26 @@ async def _wait_hangs(ctx: _Ctx) -> None:
 
 def _write_report(
     ctx: _Ctx, started_at: datetime, reports_dir: Path, log: list[Seen], unreadable: set[int]
-) -> Path:
+) -> Path | None:
+    """Итог — в консоль всегда; файл — если каталог отчётов доступен на запись."""
     s, j = ctx.s, ctx.journal
     result = tally(j.sent, j.acks, j.aborted, j.errors, log, unreadable)
     vis = [visibility(name, j.acks, j.aborted, j.seen.get(name, []), log) for name in s.observers]
     started = started_at.strftime("%Y-%m-%d %H:%M:%S")
     settings = effective_settings(s)
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"{started_at:%Y-%m-%d_%H%M%S}_{s.name}.md"
-    path.write_text(render_markdown(s, settings, j.events, result, vis, started), encoding="utf-8")
     buf = io.StringIO()
     Console(file=buf, width=CONSOLE_WIDTH, force_terminal=False).print(
         render_console(s, settings, j.events, result, vis, started)
     )
     ctx.out(buf.getvalue().rstrip("\n"))
+    path = reports_dir / f"{started_at:%Y-%m-%d_%H%M%S}_{s.name}.md"
+    try:
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            render_markdown(s, settings, j.events, result, vis, started), encoding="utf-8"
+        )
+    except OSError as exc:
+        ctx.out(f"отчёт не записан в {reports_dir}: {type(exc).__name__}: {exc}")
+        return None
     ctx.out(f"отчёт: {path}")
     return path

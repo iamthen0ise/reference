@@ -217,6 +217,20 @@ def test_report_written(tmp_path: Path) -> None:
     assert net.heals >= 2  # сбой heal + очистка
 
 
+def test_unwritable_reports_dir_still_prints_summary(tmp_path: Path) -> None:
+    blocker = tmp_path / "reports"
+    # На месте каталога файл: mkdir падает, как при чужом владельце каталога на Linux.
+    blocker.write_text("")
+    s = scenario("  - {at: 0s, heal: all}", 0.3)
+    out: list[str] = []
+    d = deps(FakeCluster([layout(1)]), FakeBrokers(), FakeNet())
+    path = asyncio.run(run_scenario(s, d, out.append, clients=CLIENTS, reports_dir=blocker))
+    assert path is None
+    text = "\n".join(out)
+    assert "потеряно" in text
+    assert "отчёт не записан" in text
+
+
 def test_idempotence_without_acks_all_fails_before_cluster(tmp_path: Path) -> None:
     s = load_scenario(
         "t",

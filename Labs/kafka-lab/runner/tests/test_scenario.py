@@ -149,6 +149,8 @@ def test_required_fields_name_the_path() -> None:
         load_scenario("d", MINIMAL.replace("partitions: 1", "partitions: 0"), [])
     with pytest.raises(ScenarioError, match="observers"):
         load_scenario("d", MINIMAL + "observers: [nope]\n", [])
+    with pytest.raises(ScenarioError, match="повтор"):
+        load_scenario("d", MINIMAL + "observers: [read_committed, read_committed]\n", [])
 
 
 def test_bad_yaml_is_scenario_error() -> None:

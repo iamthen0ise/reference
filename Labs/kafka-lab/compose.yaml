@@ -36,6 +36,8 @@ x-netem: &netem
   build: ./netem
   cap_drop: [ALL]
   cap_add: [NET_ADMIN]
+  # Агент — PID 1 без обработчика SIGTERM: без init каждый restart сайдкара ждал бы полные 10 с до SIGKILL.
+  init: true
   restart: unless-stopped
   environment:
     PEER_HOSTS: kafka1,kafka2,kafka3,runner,controller
@@ -155,6 +157,8 @@ services:
       - -listenip=0.0.0.0
       - -allowfrom=runner
       - -allowGET=/containers/json
+      # Allowlist не знает проекта compose: выбор контейнеров (только брокеры и сайдкары этого стенда) — в коде раннера,
+      # DockerControl. Код раннера считаем доверенным; чужой код в контейнере runner сможет остановить любой контейнер хоста.
       - -allowPOST=/containers/[0-9a-f]{12,64}/(start|stop|restart|kill)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
