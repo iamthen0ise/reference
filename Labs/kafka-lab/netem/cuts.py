@@ -1,6 +1,7 @@
 """Правила iptables для направленных обрывов связи брокера с пирами (чистые функции, без вызова iptables)."""
 
 CHAIN = "LAB-CUT"
+AGENT_PORT = 9000
 
 # Цепочка подключена и в INPUT, и в OUTPUT: `-d peer` срабатывает только на исходящих пакетах, `-s peer` — только на входящих.
 _FLAGS = {"out": "-d", "in": "-s"}
@@ -19,10 +20,14 @@ def rule_args(ips: dict[str, str | None], cuts: set[tuple[str, str]]) -> list[li
     return args
 
 
-def restore_input(ips: dict[str, str | None], cuts: set[tuple[str, str]]) -> str:
+def restore_input(ips: dict[str, str | None], cuts: set[tuple[str, str]], agent_port: int = AGENT_PORT) -> str:
     """Вход для `iptables-restore --noflush`: объявление цепочки очищает её и заполняет заново одной транзакцией,
-    поэтому окна без DROP при перезаписи нет."""
-    lines = ["*filter", f":{CHAIN} - [0:0]"]
+    поэтому окна без DROP при перезаписи нет.
+
+    Порт агента исключён из обрывов (RETURN до всех DROP): иначе обрыв до раннера глушит и ответы агента, и `/heal` не дойдёт."""
+    lines = ["*filter", f":{CHAIN} - [0:0]",
+             f"-A {CHAIN} -p tcp --dport {agent_port} -j RETURN",
+             f"-A {CHAIN} -p tcp --sport {agent_port} -j RETURN"]
     lines += [" ".join(a) for a in rule_args(ips, cuts)]
     lines.append("COMMIT")
     return "\n".join(lines) + "\n"

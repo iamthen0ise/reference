@@ -23,6 +23,7 @@ log = logging.getLogger("netem")
 PEERS = [h for h in os.environ.get("PEER_HOSTS", "").split(",") if h]
 PORT = int(os.environ.get("PORT", "9000"))
 RECONCILE_INTERVAL = 3.0
+IPTABLES_TIMEOUT = 10  # занятая блокировка xtables не должна вешать агента под self._lock
 
 
 class Cuts:
@@ -79,20 +80,20 @@ class Cuts:
             try:
                 setup_chain()
                 self.chain_ready = True
-            except (subprocess.CalledProcessError, OSError) as exc:
+            except (subprocess.SubprocessError, OSError) as exc:
                 self.error = f"iptables недоступен: {describe_error(exc)}"
                 log.error("%s", self.error)
                 return
-        rules = restore_input(ips, self.cuts)
+        rules = restore_input(ips, self.cuts, PORT)
         if rules == self._applied:
             return
         try:
             subprocess.run(["iptables-restore", "-w", "--noflush"], input=rules, check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, timeout=IPTABLES_TIMEOUT)
             self._applied = rules
             self.error = None
             log.info("cuts: %s", sorted(self.cuts) or "none")
-        except (subprocess.CalledProcessError, OSError) as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
             self._applied = None
             self.error = f"iptables-restore: {describe_error(exc)}"
             log.error("%s", self.error)
@@ -109,6 +110,8 @@ def resolve_all() -> dict[str, str | None]:
 
 
 def describe_error(exc: Exception) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"{' '.join(map(str, exc.cmd))}: таймаут {IPTABLES_TIMEOUT} с"
     if isinstance(exc, subprocess.CalledProcessError):
         return f"{' '.join(map(str, exc.cmd))}: {(exc.stderr or '').strip()}"
     return str(exc)
@@ -116,11 +119,11 @@ def describe_error(exc: Exception) -> str:
 
 def setup_chain() -> None:
     """Своя цепочка, подключённая в INPUT и OUTPUT один раз; чужие правила не трогаем, свою цепочку очищаем."""
-    subprocess.run(["iptables", "-w", "-N", CHAIN], capture_output=True)  # уже есть — не ошибка
+    subprocess.run(["iptables", "-w", "-N", CHAIN], capture_output=True, timeout=IPTABLES_TIMEOUT)  # уже есть — не ошибка
     for hook in ("INPUT", "OUTPUT"):
-        if subprocess.run(["iptables", "-w", "-C", hook, "-j", CHAIN], capture_output=True).returncode != 0:
-            subprocess.run(["iptables", "-w", "-I", hook, "-j", CHAIN], check=True, capture_output=True, text=True)
-    subprocess.run(["iptables", "-w", "-F", CHAIN], check=True, capture_output=True, text=True)
+        if subprocess.run(["iptables", "-w", "-C", hook, "-j", CHAIN], capture_output=True, timeout=IPTABLES_TIMEOUT).returncode != 0:
+            subprocess.run(["iptables", "-w", "-I", hook, "-j", CHAIN], check=True, capture_output=True, text=True, timeout=IPTABLES_TIMEOUT)
+    subprocess.run(["iptables", "-w", "-F", CHAIN], check=True, capture_output=True, text=True, timeout=IPTABLES_TIMEOUT)
 
 
 cuts = Cuts()
