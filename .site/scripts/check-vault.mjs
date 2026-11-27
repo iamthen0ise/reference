@@ -9,7 +9,7 @@ export async function listNotes(root, dir = root) {
   const atRoot = dir === root;
   for (const e of await readdir(dir, { withFileTypes: true })) {
     if (e.isDirectory()) {
-      if (isIgnoredDir(e.name, atRoot)) continue;
+      if (isIgnoredDir(e.name, atRoot, relative(root, dir).split('\\').join('/'))) continue;
       out.push(...(await listNotes(root, join(dir, e.name))));
     } else if (e.isFile() && e.name.endsWith('.md') && !isIgnoredFile(e.name, atRoot)) {
       out.push(join(dir, e.name));

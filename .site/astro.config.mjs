@@ -80,7 +80,7 @@ const sidebar = [
             label: 'PostgreSQL',
             items: pages('Бэкенд/Базы данных/PostgreSQL', [
               'PostgreSQL', 'Нормализация', 'Транзакции и уровни изоляции', 'Индексы', 'EXPLAIN', 'Миграции без простоя',
-              'JSON и JSONB', 'Блокировки', 'Эксплуатация PostgreSQL', 'Тестовый стенд',
+              'JSON и JSONB', 'Блокировки', 'Эксплуатация PostgreSQL',
             ]),
           },
           {
@@ -128,6 +128,7 @@ const sidebar = [
   },
   { label: 'Linux', items: pages('Linux', ['Linux', 'Процессы в Linux', 'Сигналы в Linux', 'Память в Linux', 'Файлы и дескрипторы', 'Ввод-вывод и сеть', 'Контейнеры изнутри']) },
   { label: 'Docker и Kubernetes', items: pages('Docker и Kubernetes', ['Docker и Kubernetes', 'Образы Docker', 'Docker на практике', 'Объекты Kubernetes', 'Конфигурация и нагрузки в Kubernetes', 'Деплой в Kubernetes', 'Ресурсы и остановка в Kubernetes', 'Отладка в Kubernetes', 'Отладка сервисов и нагрузки в Kubernetes']) },
+  { label: 'Labs', items: pages('Labs', ['Labs', 'Стенд репликации PostgreSQL']) },
 ];
 
 export default defineConfig({
@@ -138,6 +139,8 @@ export default defineConfig({
     '/': `${base}/notes/`,
     // Страница переименована: «Плавающее окно» → «Скользящее окно».
     '/notes/алгоритмы/паттерны-задач/плавающее-окно': `${base}/notes/алгоритмы/паттерны-задач/скользящее-окно/`,
+    // Страница переехала в раздел Labs: «Тестовый стенд» → «Стенд репликации PostgreSQL».
+    '/notes/бэкенд/базы-данных/postgresql/тестовый-стенд': `${base}/notes/labs/стенд-репликации-postgresql/`,
   },
   markdown: {
     // Astro 7 рендерит markdown через Sätteri; starlight-obsidian пишет ссылки /notes/... без base.

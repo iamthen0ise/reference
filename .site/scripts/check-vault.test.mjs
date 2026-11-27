@@ -108,6 +108,21 @@ test('only root docs/ and README.md are ignored: nested ones are checked', async
   }
 });
 
+test('Labs/: lab pages are checked, lab code dirs inside are ignored', async () => {
+  const dir = await tmpVault({
+    'Labs/Labs.md': '[[Нет1]]\n',
+    'Labs/some-lab/README.md': '[[Нет2]]\n',
+    'Labs/some-lab/docs/X.md': '[[Нет3]]\n',
+    'Python/some-lab/README.md': '[[Нет4]]\n',
+  });
+  try {
+    const problems = await checkVault(dir);
+    assert.deepEqual(problems.map((p) => p.file).sort(), ['Labs/Labs.md', 'Python/some-lab/README.md']);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});
+
 test('countVault counts mermaid fences and callouts outside other fences', async () => {
   const dir = await tmpVault({
     'A.md': [

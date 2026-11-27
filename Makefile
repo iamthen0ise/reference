@@ -55,12 +55,12 @@ sql-down:
 sql-test:
 	bash .site/scripts/sql-pg.test.sh
 
-# Стенд репликации PostgreSQL (страница «Тестовый стенд»): primary, три реплики, нагрузка, дашборд на :8088.
+# Стенд репликации PostgreSQL (страница «Стенд репликации PostgreSQL» в Labs): primary, три реплики, нагрузка, дашборд на :8088.
 pglab-up:
-	cd .site/pg-replication-lab && docker compose up -d --build
+	cd Labs/pg-replication-lab && docker compose up -d --build
 
 pglab-down:
-	cd .site/pg-replication-lab && docker compose down -v
+	cd Labs/pg-replication-lab && docker compose down -v
 
 # Прогон демонстраций страниц «Linux» в контейнере с Debian (образ из .site/linux-box).
 linux-up:
