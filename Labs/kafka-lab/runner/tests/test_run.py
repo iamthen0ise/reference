@@ -79,7 +79,9 @@ def layout(leader: int) -> dict[int, PartitionState]:
     return {0: PartitionState(leader=leader, replicas=(1, 2, 3), isr=(1, 2, 3))}
 
 
-async def fake_producer(spec, topic, bootstrap, stop, journal: Journal) -> None:
+async def fake_producer(spec, topic, bootstrap, stop, journal: Journal, ready=None) -> None:
+    if ready is not None:
+        ready.set()
     journal.sent += 1
     journal.acks.append(Ack(seq=0, partition=0, offset=0, t=time.monotonic()))
     await stop.wait()
@@ -227,3 +229,24 @@ def test_idempotence_without_acks_all_fails_before_cluster(tmp_path: Path) -> No
     with pytest.raises(ScenarioError, match="acks"):
         run(s, deps(cluster, FakeBrokers(), net), tmp_path, [])
     assert cluster.layout_calls == 0 and net.heals == 0
+
+
+def test_read_all_failure_still_writes_report(tmp_path: Path) -> None:
+    async def broken_read_all(topic, bootstrap, isolation, timeout):
+        raise RuntimeError("метаданных нет")
+
+    clients = Clients(
+        run_producer=fake_producer,
+        hang_transaction=fake_hang,
+        run_observer=fake_observer,
+        read_all=broken_read_all,
+    )
+    s = scenario("  - {at: 0s, cut: kafka1, peer: kafka2}", 0.2)
+    out: list[str] = []
+    path = asyncio.run(
+        run_scenario(s, deps(FakeCluster([layout(1)]), FakeBrokers(), FakeNet()), out.append, clients=clients, reports_dir=tmp_path)
+    )
+    text = path.read_text()
+    assert "итоговое чтение не удалось: RuntimeError" in text
+    assert "партиция 0 недоступна" in text
+    assert "| потеряно — подтверждены, но в логе нет | 0 |" in text

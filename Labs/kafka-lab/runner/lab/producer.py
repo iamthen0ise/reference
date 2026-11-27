@@ -3,6 +3,8 @@
 import asyncio
 import time
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaError
@@ -16,6 +18,8 @@ ACKS = {"0": 0, "1": 1, "all": "all"}
 STOP_TIMEOUT = 15.0
 RETRY_PAUSE = 0.5
 HANG_SEQ = -1
+DRAIN_MARGIN = 10.0
+UNRESOLVED = "Unresolved"  # исход отправки неизвестен: не подтверждена и не отклонена
 
 
 def check_producer(spec: ProducerSpec) -> None:
@@ -34,7 +38,17 @@ def _error_name(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _new_producer(spec: ProducerSpec, bootstrap: str, **extra: object) -> AIOKafkaProducer:
+def drain_budget(spec: ProducerSpec) -> float:
+    """Сколько продюсер ждёт неподтверждённые отправки после стопа; раннер ждёт его чуть дольше."""
+    return spec.request_timeout_ms / 1000 + DRAIN_MARGIN
+
+
+def _new_producer(
+    spec: ProducerSpec, bootstrap: str, transactional_id: str | None = None
+) -> AIOKafkaProducer:
+    extra: dict[str, object] = {}
+    if transactional_id is not None:
+        extra["transactional_id"] = transactional_id
     return AIOKafkaProducer(
         bootstrap_servers=bootstrap,
         acks=ACKS[spec.acks],
@@ -53,7 +67,7 @@ async def _stop_quietly(producer: AIOKafkaProducer) -> None:
 
 def _record_ack(journal: Journal, seq: int, fut: "asyncio.Future") -> None:
     if fut.cancelled():
-        journal.errors.append(SendError(seq=seq, error="Cancelled", t=time.monotonic()))
+        journal.errors.append(SendError(seq=seq, error=UNRESOLVED, t=time.monotonic()))
         return
     exc = fut.exception()
     if exc is not None:
@@ -63,17 +77,23 @@ def _record_ack(journal: Journal, seq: int, fut: "asyncio.Future") -> None:
     journal.acks.append(Ack(seq=seq, partition=meta.partition, offset=meta.offset, t=time.monotonic()))
 
 
-async def run_producer(
-    spec: ProducerSpec, topic: str, bootstrap: str, stop: asyncio.Event, journal: Journal
+async def run_producer(  # noqa: PLR0913 — ready и factory нужны раннеру и тестам
+    spec: ProducerSpec,
+    topic: str,
+    bootstrap: str,
+    stop: asyncio.Event,
+    journal: Journal,
+    *,
+    ready: asyncio.Event | None = None,
+    factory: Callable[..., Any] = _new_producer,
 ) -> None:
+    """Нагрузка до `stop` или `spec.seconds`; `ready` ставится, когда продюсер стартовал (от него идёт расписание)."""
     check_producer(spec)
-    if spec.transactional is None:
-        producer = _new_producer(spec, bootstrap)
-    else:
-        producer = _new_producer(
-            spec, bootstrap, transactional_id=f"lab-{uuid.uuid4().hex[:8]}"
-        )
+    tx_id = None if spec.transactional is None else f"lab-{uuid.uuid4().hex[:8]}"
+    producer = factory(spec, bootstrap, tx_id)
     await producer.start()
+    if ready is not None:
+        ready.set()
     try:
         if spec.transactional is None:
             await _plain_loop(producer, spec, topic, stop, journal)
@@ -88,10 +108,10 @@ def _pace(start: float, n: int, rate: int) -> float:
 
 
 async def _plain_loop(
-    producer: AIOKafkaProducer, spec: ProducerSpec, topic: str, stop: asyncio.Event, journal: Journal
+    producer: Any, spec: ProducerSpec, topic: str, stop: asyncio.Event, journal: Journal
 ) -> None:
     in_flight = asyncio.Semaphore(spec.rate)  # max_in_flight = rate
-    pending: set[asyncio.Future] = set()
+    pending: dict[asyncio.Future, int] = {}
     start = time.monotonic()
     seq = 0
     try:
@@ -103,32 +123,49 @@ async def _plain_loop(
                 fut = await producer.send(
                     topic, str(seq).encode(), key=str(seq % KEY_SPACE).encode()
                 )
-            except KafkaError as exc:
+            except Exception as exc:  # noqa: BLE001 — любая ошибка отправки попадает в журнал
                 journal.errors.append(SendError(seq=seq, error=_error_name(exc), t=time.monotonic()))
                 in_flight.release()
                 seq += 1
                 continue
-            pending.add(fut)
-            fut.add_done_callback(_on_done(seq, journal, in_flight, pending))
+            pending[fut] = seq
+            fut.add_done_callback(_on_done(journal, in_flight, pending))
             seq += 1
-        if pending:
-            await asyncio.wait(pending, timeout=spec.request_timeout_ms / 1000 + STOP_TIMEOUT)
+        if pending:  # новых отправок нет, ждём подтверждений
+            await asyncio.wait(list(pending), timeout=drain_budget(spec))
     finally:
-        for fut in pending:
+        # Неразрешившиеся отправки: исход неизвестен, это не обычная ошибка отправки.
+        for fut, s in list(pending.items()):
+            del pending[fut]
             fut.cancel()
+            journal.errors.append(SendError(seq=s, error=UNRESOLVED, t=time.monotonic()))
 
 
-def _on_done(seq: int, journal: Journal, sem: asyncio.Semaphore, pending: set):  # noqa: ANN202
+def _on_done(journal: Journal, sem: asyncio.Semaphore, pending: dict[asyncio.Future, int]):  # noqa: ANN202
     def callback(fut: asyncio.Future) -> None:
-        pending.discard(fut)
+        seq = pending.pop(fut, None)
         sem.release()
-        _record_ack(journal, seq, fut)
+        if seq is not None:  # None: запись уже сделал finally
+            _record_ack(journal, seq, fut)
 
     return callback
 
 
-async def _tx_loop(
-    producer: AIOKafkaProducer, spec: ProducerSpec, topic: str, stop: asyncio.Event, journal: Journal
+def _retrieve(fut: asyncio.Future) -> None:
+    if not fut.cancelled():
+        fut.exception()  # прочитать, чтобы не было «exception was never retrieved»
+
+
+async def _try_abort(producer: Any) -> bool:
+    try:
+        await asyncio.wait_for(producer.abort_transaction(), STOP_TIMEOUT)
+    except (KafkaError, RuntimeError, TimeoutError):
+        return False
+    return True
+
+
+async def _tx_loop(  # noqa: PLR0912
+    producer: Any, spec: ProducerSpec, topic: str, stop: asyncio.Event, journal: Journal
 ) -> None:
     assert spec.transactional is not None  # noqa: S101 — сужение типа
     abort_every = spec.transactional.abort_every
@@ -137,38 +174,41 @@ async def _tx_loop(
     tx_number = 0
     while not stop.is_set() and time.monotonic() - start < spec.seconds:
         tx_number += 1
-        seqs = list(range(seq, seq + spec.batch))
-        seq += spec.batch
         to_abort = tx_number % abort_every == 0
+        sent: list[int] = []  # seq, по которым была попытка отправки в этой транзакции
         futures: list[asyncio.Future] = []
         try:
             await producer.begin_transaction()
-            for s in seqs:
+            while len(sent) < spec.batch and not stop.is_set():
+                s = seq
+                seq += 1
                 await asyncio.sleep(_pace(start, s, spec.rate))
                 journal.sent += 1
-                futures.append(
-                    await producer.send(topic, str(s).encode(), key=str(s % KEY_SPACE).encode())
-                )
+                sent.append(s)
+                fut = await producer.send(topic, str(s).encode(), key=str(s % KEY_SPACE).encode())
+                fut.add_done_callback(_retrieve)
+                futures.append(fut)
             if to_abort:
                 await producer.abort_transaction()
-                journal.aborted.update(seqs)
+                journal.aborted.update(sent)
                 continue
             await producer.commit_transaction()
-        except KafkaError as exc:
+        except asyncio.CancelledError:
+            # Открытая транзакция не должна висеть до таймаута брокера: откатываем и учитываем отправленное.
+            if await _try_abort(producer):
+                journal.aborted.update(sent)
+            else:
+                now = time.monotonic()
+                journal.errors.extend(SendError(seq=s, error=UNRESOLVED, t=now) for s in sent)
+            raise
+        except Exception as exc:  # noqa: BLE001 — сбой транзакции: ошибки только по отправленным seq
             now = time.monotonic()
-            journal.errors.extend(SendError(seq=s, error=_error_name(exc), t=now) for s in seqs)
-            await _abort_quietly(producer)
+            journal.errors.extend(SendError(seq=s, error=_error_name(exc), t=now) for s in sent)
+            await _try_abort(producer)
             await asyncio.sleep(RETRY_PAUSE)
             continue
-        for s, fut in zip(seqs, futures, strict=True):
+        for s, fut in zip(sent, futures, strict=True):
             _record_ack(journal, s, fut)
-
-
-async def _abort_quietly(producer: AIOKafkaProducer) -> None:
-    try:
-        await producer.abort_transaction()
-    except (KafkaError, RuntimeError):
-        pass
 
 
 async def hang_transaction(topic: str, bootstrap: str, seconds: float) -> None:

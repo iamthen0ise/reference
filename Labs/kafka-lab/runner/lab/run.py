@@ -25,6 +25,7 @@ HEALTHY_AFTER_CREATE = 30.0
 READ_TIMEOUT = 30.0
 OBSERVER_DRAIN = 1.0
 TASK_STOP_TIMEOUT = 20.0
+PRODUCER_STOP_EXTRA = 25.0  # drain + producer.stop() (STOP_TIMEOUT) + запас
 CONSOLE_WIDTH = 110
 LIVE_PREFIX = "\r"  # строка с этим префиксом `out` перезаписывает текущую, без перевода строки
 
@@ -214,14 +215,17 @@ async def _cancel_all(tasks: list[asyncio.Task]) -> None:
             await asyncio.wait_for(t, TASK_STOP_TIMEOUT)
 
 
-async def _stop_task(task: asyncio.Task, event: asyncio.Event, ctx: _Ctx, name: str) -> None:
+async def _stop_task(
+    task: asyncio.Task, event: asyncio.Event, ctx: _Ctx, name: str, timeout: float = TASK_STOP_TIMEOUT
+) -> None:
     """Просит задачу остановиться и ждёт; упавшая задача — событие в отчёте, а не обрыв прогона."""
     event.set()
-    await asyncio.wait({task}, timeout=TASK_STOP_TIMEOUT)
+    await asyncio.wait({task}, timeout=timeout)
     if not task.done():
         task.cancel()
-        ctx.log(f"{name} не остановился за {TASK_STOP_TIMEOUT:g} с")
-    elif not task.cancelled() and task.exception() is not None:
+        ctx.log(f"{name} не остановился за {timeout:g} с, отменён")
+        await asyncio.wait({task}, timeout=TASK_STOP_TIMEOUT)
+    if task.done() and not task.cancelled() and task.exception() is not None:
         exc = task.exception()
         ctx.log(f"{name} упал: {type(exc).__name__}: {exc}")
 
@@ -251,21 +255,30 @@ async def run_scenario(
         if not await deps.cluster.wait_healthy(s.topic.name, HEALTHY_AFTER_CREATE):
             ctx.log("топик не стал здоровым после создания")
         await _layout(ctx)
-        ctx.t0 = deps.clock()
         topic, bootstrap = s.topic.name, deps.bootstrap
         observer_tasks = [
             asyncio.create_task(clients.run_observer(iso, topic, bootstrap, stop_observers, ctx.journal))
             for iso in s.observers
         ]
+        ready = asyncio.Event()
         producer_task = asyncio.create_task(
-            clients.run_producer(s.producer, topic, bootstrap, stop_producer, ctx.journal)
+            clients.run_producer(s.producer, topic, bootstrap, stop_producer, ctx.journal, ready=ready)
         )
+        # Расписание сбоев и seconds отсчитываются от старта продюсера, а не от подготовки.
+        waiter = asyncio.create_task(ready.wait())
+        await asyncio.wait({producer_task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        waiter.cancel()
+        if not ready.is_set():
+            ctx.log("продюсер не стартовал")
+        ctx.t0 = deps.clock()
         background = [
             asyncio.create_task(_poll_layout(ctx)),
             asyncio.create_task(_live(ctx)),
         ]
         await _run_faults(ctx)
-        await _stop_task(producer_task, stop_producer, ctx, "продюсер")
+        await _stop_task(
+            producer_task, stop_producer, ctx, "продюсер", producer.drain_budget(s.producer) + PRODUCER_STOP_EXTRA
+        )
         completed = True
     finally:
         # Обрывы и остановленные брокеры не должны пережить прогон: следующий опыт соврёт.
@@ -290,8 +303,22 @@ async def run_scenario(
         *(_stop_task(t, stop_observers, ctx, f"наблюдатель {iso}") for t, iso in zip(observer_tasks, s.observers, strict=True))
     )
     await _wait_hangs(ctx)
-    log, unreadable = await clients.read_all(s.topic.name, deps.bootstrap, "read_committed", READ_TIMEOUT)
+    try:
+        log, unreadable = await clients.read_all(
+            s.topic.name, deps.bootstrap, "read_committed", READ_TIMEOUT
+        )
+    except Exception as exc:  # noqa: BLE001 — отчёт важнее: все партиции считаем непрочитанными
+        log = []
+        unreadable = await _all_partitions(ctx)
+        ctx.log(f"итоговое чтение не удалось: {type(exc).__name__}: {exc}")
     return _write_report(ctx, started_at, reports_dir, log, unreadable)
+
+
+async def _all_partitions(ctx: _Ctx) -> set[int]:
+    try:
+        return set((await ctx.deps.cluster.layout(ctx.s.topic.name)).keys())
+    except Exception:  # noqa: BLE001 — раскладки нет, берём число партиций из сценария
+        return set(range(ctx.s.topic.partitions))
 
 
 async def _wait_hangs(ctx: _Ctx) -> None:

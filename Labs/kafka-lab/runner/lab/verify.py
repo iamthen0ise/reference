@@ -1,6 +1,7 @@
 """Итоговое перечитывание лога: до конца каждой партиции на момент старта, без зависаний."""
 
 import asyncio
+import contextlib
 import time
 
 from aiokafka import AIOKafkaConsumer, TopicPartition
@@ -12,6 +13,7 @@ from lab.tally import Seen
 POLL_MS = 200
 OFFSETS_TIMEOUT = 10.0
 REQUEST_TIMEOUT_MS = 10000
+STOP_TIMEOUT = 5.0
 
 
 async def _end_offset(consumer: AIOKafkaConsumer, tp: TopicPartition, timeout: float) -> int | None:
@@ -34,13 +36,13 @@ async def read_all(
         enable_auto_commit=False,
         request_timeout_ms=REQUEST_TIMEOUT_MS,
     )
-    await consumer.start()
     try:
-        tps = await partitions_of(consumer, topic)
+        await asyncio.wait_for(consumer.start(), _left(deadline))
+        tps = await asyncio.wait_for(partitions_of(consumer, topic), _left(deadline))
         ends: dict[TopicPartition, int] = {}
         unreadable: set[int] = set()
         for tp in tps:
-            end = await _end_offset(consumer, tp, max(deadline - time.monotonic(), 0.1))
+            end = await _end_offset(consumer, tp, _left(deadline))
             if end is None:
                 unreadable.add(tp.partition)
             else:
@@ -48,7 +50,12 @@ async def read_all(
         log = await _drain(consumer, ends, deadline, unreadable)
         return log, unreadable
     finally:
-        await consumer.stop()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(consumer.stop(), STOP_TIMEOUT)
+
+
+def _left(deadline: float) -> float:
+    return max(deadline - time.monotonic(), 0.1)
 
 
 async def _drain(
@@ -61,8 +68,12 @@ async def _drain(
     todo = {tp for tp, end in ends.items() if end > 0}
     if not todo:
         return log
-    consumer.assign(sorted(todo))
-    await consumer.seek_to_beginning(*todo)
+    try:
+        consumer.assign(sorted(todo))
+        await asyncio.wait_for(consumer.seek_to_beginning(*todo), _left(deadline))
+    except (TimeoutError, KafkaError):
+        unreadable.update(tp.partition for tp in todo)
+        return log
     while todo and time.monotonic() < deadline:
         try:
             batches = await consumer.getmany(timeout_ms=POLL_MS)
@@ -73,8 +84,10 @@ async def _drain(
                     if seq is not None and seq >= 0 and msg.offset < ends[tp]:
                         log.append(Seen(seq=seq, partition=tp.partition, offset=msg.offset, t=now))
             for tp in list(todo):
-                if await consumer.position(tp) >= ends[tp]:
+                if await asyncio.wait_for(consumer.position(tp), _left(deadline)) >= ends[tp]:
                     todo.discard(tp)
+        except TimeoutError:
+            break
         except KafkaError:
             await asyncio.sleep(POLL_MS / 1000)
     unreadable.update(tp.partition for tp in todo)

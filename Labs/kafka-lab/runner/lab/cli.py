@@ -110,10 +110,12 @@ async def _heal(deps: Deps) -> None:
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
+    scenario = _load(args.name, args.overrides) if args.cmd == "run" else None  # до любых объектов кластера
     deps = build_deps()
     match args.cmd:
         case "run":
-            await run_scenario(_load(args.name, args.overrides), deps, out)
+            assert scenario is not None  # noqa: S101
+            await run_scenario(scenario, deps, out)
         case "state":
             await _state(deps)
         case "kill" | "stop" | "start":
