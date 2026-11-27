@@ -19,7 +19,10 @@ class FakeProducer:
         hang_sends: bool = False,
         fail_abort: bool = False,
         fail_futures: set[int] | None = None,
+        send_delays: list[float] | None = None,
     ) -> None:
+        self.send_delays = send_delays
+        self.enqueued: list[int] = []
         self.fail_futures = fail_futures
         self.fail_send_at = fail_send_at
         self.hang_sends = hang_sends
@@ -35,6 +38,9 @@ class FakeProducer:
 
     async def send(self, topic: str, value: bytes, key: bytes) -> asyncio.Future:
         self.sends += 1
+        if self.send_delays:
+            await asyncio.sleep(self.send_delays[(self.sends - 1) % len(self.send_delays)])
+        self.enqueued.append(int(value))
         if self.fail_send_at is not None and self.sends == self.fail_send_at:
             raise ValueError("не отправилось")
         fut = asyncio.get_running_loop().create_future()
@@ -198,3 +204,11 @@ def test_no_app_retries_by_default() -> None:
     assert [e.seq for e in j.errors] == [0]
     assert fake.sends == j.sent
     assert_exactly_once(j)
+
+
+@pytest.mark.parametrize("app_retries", [0, 2])
+def test_enqueue_order_follows_seq_when_send_suspends(app_retries: int) -> None:
+    j, fake = Journal(), FakeProducer(send_delays=[0.03, 0.0, 0.02, 0.0])
+    run(spec(seconds=0.3, rate=200, app_retries=app_retries), fake, j)
+    assert len(fake.enqueued) > 4
+    assert fake.enqueued == sorted(fake.enqueued)

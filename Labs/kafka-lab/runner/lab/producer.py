@@ -78,9 +78,7 @@ def _record_ack(journal: Journal, seq: int, fut: "asyncio.Future") -> None:
         journal.errors.append(SendError(seq=seq, error=_error_name(exc), t=time.monotonic()))
         return
     meta = fut.result()
-    journal.acks.append(
-        Ack(seq=seq, partition=meta.partition, offset=meta.offset, t=time.monotonic())
-    )
+    journal.acks.append(Ack(seq=seq, partition=meta.partition, offset=meta.offset, t=time.monotonic()))
 
 
 async def run_producer(  # noqa: PLR0913 — ready и factory нужны раннеру и тестам
@@ -113,34 +111,66 @@ def _pace(start: float, n: int, rate: int) -> float:
     return max(0.0, start + n / rate - time.monotonic())
 
 
-async def _deliver(
-    producer: Any, spec: ProducerSpec, topic: str, seq: int, journal: Journal
-) -> None:
-    """Отправляет seq, при ошибке повторяет тот же seq до `app_retries` раз.
-
-    Каждая неудачная попытка — запись в `journal.errors`; итоговое подтверждение — одна запись в `journal.acks`.
-    Отмена не записывается здесь: это делает `_on_done` (исход неизвестен).
-    """
-    for attempt in range(spec.app_retries + 1):
-        if attempt:
-            await asyncio.sleep(APP_RETRY_PAUSE)
-        try:
-            fut = await producer.send(topic, str(seq).encode(), key=str(seq % KEY_SPACE).encode())
-            meta = await fut
-        except Exception as exc:  # noqa: BLE001 — любая ошибка отправки попадает в журнал
-            journal.errors.append(SendError(seq=seq, error=_error_name(exc), t=time.monotonic()))
-            continue
-        journal.acks.append(
-            Ack(seq=seq, partition=meta.partition, offset=meta.offset, t=time.monotonic())
-        )
-        return
-
-
 async def _plain_loop(
     producer: Any, spec: ProducerSpec, topic: str, stop: asyncio.Event, journal: Journal
 ) -> None:
     in_flight = asyncio.Semaphore(spec.rate)  # max_in_flight = rate
-    pending: dict[asyncio.Task, int] = {}
+    pending: dict[asyncio.Future, int] = {}
+    retry_tasks: dict[asyncio.Task, int] = {}  # seq, который сейчас ждёт повтора app_retries
+    attempts: dict[int, int] = {}  # сколько повторов seq уже сделано
+    retries = spec.app_retries
+
+    def settle(fut: asyncio.Future) -> None:
+        seq = pending.pop(fut, None)
+        if seq is None:  # запись уже сделал finally
+            in_flight.release()
+            return
+        failed = not fut.cancelled() and fut.exception() is not None
+        if failed and attempts.get(seq, 0) < retries:
+            _record_ack(journal, seq, fut)  # неудачная попытка — запись об ошибке
+            start_retry(seq)  # семафор остаётся занятым до исхода seq
+            return
+        in_flight.release()
+        _record_ack(journal, seq, fut)
+
+    def start_retry(seq: int) -> None:
+        task = asyncio.create_task(resend(seq))
+        retry_tasks[task] = seq
+        task.add_done_callback(retry_done)
+
+    def first_failed(seq: int) -> None:
+        if retries:
+            start_retry(seq)
+        else:
+            in_flight.release()
+
+    def retry_done(task: asyncio.Task) -> None:
+        seq = retry_tasks.pop(task, None)
+        if seq is not None and task.cancelled():
+            journal.errors.append(SendError(seq=seq, error=UNRESOLVED, t=time.monotonic()))
+            in_flight.release()
+
+    async def resend(seq: int) -> None:
+        """Повтор того же seq; сама отправка последовательна внутри задачи, исход разбирает `settle`."""
+        while True:
+            attempts[seq] = attempts.get(seq, 0) + 1
+            await asyncio.sleep(APP_RETRY_PAUSE)
+            try:
+                fut = await producer.send(
+                    topic, str(seq).encode(), key=str(seq % KEY_SPACE).encode()
+                )
+            except Exception as exc:  # noqa: BLE001 — любая ошибка отправки попадает в журнал
+                journal.errors.append(
+                    SendError(seq=seq, error=_error_name(exc), t=time.monotonic())
+                )
+                if attempts[seq] >= retries:
+                    in_flight.release()
+                    return
+                continue
+            pending[fut] = seq
+            fut.add_done_callback(settle)
+            return
+
     start = time.monotonic()
     seq = 0
     try:
@@ -148,29 +178,40 @@ async def _plain_loop(
             await asyncio.sleep(_pace(start, seq, spec.rate))
             await in_flight.acquire()
             journal.sent += 1
-            task = asyncio.create_task(_deliver(producer, spec, topic, seq, journal))
-            pending[task] = seq
-            task.add_done_callback(_on_done(journal, in_flight, pending))
+            try:
+                # Первая отправка идёт прямо в цикле: порядок постановки в очередь равен порядку seq,
+                # а переполнение буфера продюсера притормаживает цикл.
+                fut = await producer.send(
+                    topic, str(seq).encode(), key=str(seq % KEY_SPACE).encode()
+                )
+            except Exception as exc:  # noqa: BLE001 — любая ошибка отправки попадает в журнал
+                journal.errors.append(SendError(seq=seq, error=_error_name(exc), t=time.monotonic()))
+                first_failed(seq)
+                seq += 1
+                continue
+            pending[fut] = seq
+            fut.add_done_callback(settle)
             seq += 1
-        if pending:  # новых отправок нет, ждём исходов
-            await asyncio.wait(list(pending), timeout=drain_budget(spec))
+        deadline = time.monotonic() + drain_budget(spec)
+        if not retries:
+            if pending:  # новых отправок нет, ждём подтверждений
+                await asyncio.wait(list(pending), timeout=drain_budget(spec))
+        else:
+            while (pending or retry_tasks) and (left := deadline - time.monotonic()) > 0:
+                await asyncio.wait(
+                    [*pending, *retry_tasks], timeout=left, return_when=asyncio.FIRST_COMPLETED
+                )
     finally:
         # Неразрешившиеся отправки: исход неизвестен, это не обычная ошибка отправки.
-        tasks = list(pending)
+        for fut, s in list(pending.items()):
+            del pending[fut]
+            fut.cancel()
+            journal.errors.append(SendError(seq=s, error=UNRESOLVED, t=time.monotonic()))
+        tasks = list(retry_tasks)
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.sleep(0)  # дать отработать _on_done
-
-
-def _on_done(journal: Journal, sem: asyncio.Semaphore, pending: dict[asyncio.Task, int]):  # noqa: ANN202
-    def callback(task: asyncio.Task) -> None:
-        seq = pending.pop(task, None)
-        sem.release()
-        if seq is not None and task.cancelled():
-            journal.errors.append(SendError(seq=seq, error=UNRESOLVED, t=time.monotonic()))
-
-    return callback
+        await asyncio.sleep(0)  # дать отработать retry_done
 
 
 def _retrieve(fut: asyncio.Future) -> None:
