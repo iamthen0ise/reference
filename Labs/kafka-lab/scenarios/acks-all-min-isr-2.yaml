@@ -1,0 +1,20 @@
+description: >-
+  acks=all и min.insync.replicas=2, два брокера остановлены: ISR сжимается до лидера, записи отклоняются (NotEnoughReplicas),
+  подтверждённое не теряется. Ожидаем «потеряно» ноль и ошибки отправки после остановки.
+article: "[[Продюсер Kafka на практике]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 2
+producer:
+  acks: all
+  rate: 50
+  seconds: 12
+  request_timeout_ms: 5000
+observers: [read_committed]
+settle_seconds: 40
+faults:
+  # stop (штатная остановка) выводит реплики из ISR за 1–3 с.
+  - at: 3
+    stop: followers(p0)

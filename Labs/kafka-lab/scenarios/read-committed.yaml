@@ -1,0 +1,22 @@
+description: >-
+  read_committed: откаченные транзакции видит read_uncommitted и не видит read_committed. Каждая третья транзакция откатывается.
+  Незакрытая транзакция (hang_transaction) держит LSO: read_committed-консьюмер не видит и закоммиченное после неё, пока брокер не
+  прервёт её по transaction.timeout.ms (15 с). Смотри видимость двух наблюдателей.
+article: "[[Порядок событий]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 2
+producer:
+  acks: all
+  rate: 100
+  seconds: 30
+  batch: 50
+  transactional:
+    abort_every: 3
+observers: [read_uncommitted, read_committed]
+settle_seconds: 40
+faults:
+  - at: 5
+    hang_transaction: 15s

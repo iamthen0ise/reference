@@ -1,0 +1,23 @@
+description: >-
+  Сжатие и возврат ISR: фолловер отрезан, через replica.lag.time.max.ms (10 с; в прогонах на стенде ISR сжимался за 11–14 с после обрыва) выпадает из ISR,
+  после снятия обрыва догоняет лидера и возвращается. Смотри события: смена ISR по опросу метаданных. Потерь нет.
+article: "[[Эксплуатация Kafka и CLI]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 1
+producer:
+  acks: all
+  rate: 10
+  seconds: 60
+  request_timeout_ms: 40000
+observers: [read_committed]
+settle_seconds: 60
+faults:
+  - at: 3
+    cut: follower(p0)
+    peer: leader(p0)
+  # Обрыв держится с запасом дольше времени сжатия ISR.
+  - at: 40
+    heal: all

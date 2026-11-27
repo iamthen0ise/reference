@@ -1,0 +1,33 @@
+description: >-
+  Unclean leader election: отставшая реплика становится лидером, хвост лога пропадает. 200 сообщений при полном ISR, потом первый
+  фолловер останавливается и выпадает из ISR, затем останавливается второй, ещё ~200 сообщений только у лидера. Консьюмер всё прочитал.
+  Лидер убивается, отставший поднимается и выбирается лидером (unclean.leader.election.enable=true). Ожидаем «потеряно» не ноль,
+  видимость: консьюмер видел то, чего в логе больше нет.
+  Контроль: ARGS="--set topic.configs.unclean.leader.election.enable=false" — партиция остаётся офлайн, ничего не теряется.
+article: "[[Порядок событий]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 1
+    unclean.leader.election.enable: true
+producer:
+  acks: all
+  rate: 20
+  seconds: 40
+  request_timeout_ms: 30000
+observers: [read_committed]
+settle_seconds: 60
+faults:
+  # Отстающий выбирается в момент остановки и дальше называется $lag: follower() считается по репликам, не по ISR.
+  - at: 10
+    stop: follower(p0)
+    as: lag
+  # Второй фолловер: followers() вернёт и уже остановленного, ошибка остановки в журнале ожидаема.
+  - at: 20
+    stop: followers(p0)
+  # К 32 с ISR = {лидер} (выход из ISR при stop за 1–3 с), 200+ записей только у лидера.
+  - at: 32
+    kill: leader(p0)
+  - at: 33
+    start: $lag

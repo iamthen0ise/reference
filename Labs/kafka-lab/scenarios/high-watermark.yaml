@@ -1,0 +1,23 @@
+description: >-
+  High watermark: acks=1, оба фолловера отрезаны, но ещё в ISR. Продюсер получает подтверждения лидера, а консьюмер (read_uncommitted)
+  новых сообщений не видит: high watermark стоит, пока ISR не сожмётся (в прогонах 10–12 с после обрыва). После сжатия HW догоняет, консьюмер видит
+  накопленное. Смотри в видимости время подтверждения и время, когда сообщение увидел консьюмер.
+article: "[[Порядок событий]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 1
+producer:
+  acks: 1
+  rate: 10
+  seconds: 50
+observers: [read_uncommitted]
+settle_seconds: 60
+faults:
+  - at: 5
+    cut: followers(p0)
+    peer: leader(p0)
+  # Обрыв дольше replica.lag.time.max.ms с большим запасом (ISR сжимается к 15–17 с), потом HW сдвигается.
+  - at: 42
+    heal: all

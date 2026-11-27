@@ -1,0 +1,27 @@
+description: >-
+  acks=all и min.insync.replicas=1: ISR сжимается до лидера, лидер падает. Фолловеры отрезаются от лидера, когда ISR сожмётся до {лидер} (replica.lag.time.max.ms = 10 с плюс период проверки, на стенде 10–25 с), acks=all подтверждает записи одной копией, потом лидер убивается.
+  По умолчанию (unclean.leader.election.enable=false) в Kafka 4.1 партиция уходит офлайн (в событиях лидер None), подтверждённое
+  не теряется: после возврата лидера всё на месте. В итоговой сводке офлайн не виден, раннер сначала поднимает брокеры.
+  Вторая половина демонстрации, потеря при acks=all (unclean election выбирает фолловера без этих записей):
+  make kafkalab-run S=acks-all-min-isr-1 ARGS="--set topic.configs.unclean.leader.election.enable=true"
+article: "[[Продюсер Kafka на практике]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 1
+    unclean.leader.election.enable: false
+producer:
+  acks: all
+  rate: 20
+  seconds: 45
+  request_timeout_ms: 40000
+observers: [read_committed]
+settle_seconds: 60
+faults:
+  - at: 1
+    cut: followers(p0)
+    peer: leader(p0)
+  # Запас: к 38 с ISR гарантированно сжат до лидера, в нём 10+ с записей только у лидера.
+  - at: 38
+    kill: leader(p0)

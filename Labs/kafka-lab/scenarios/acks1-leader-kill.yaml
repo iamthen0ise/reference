@@ -1,0 +1,23 @@
+description: >-
+  acks=1 и падение лидера: подтверждённое теряется. Фолловеры отрезаются от лидера (на 4 с, меньше replica.lag.time.max.ms = 10 с,
+  поэтому остаются в ISR), лидер подтверждает записи один, потом убивается; новым лидером становится фолловер без этих записей.
+  Ожидаем «потеряно» не ноль.
+article: "[[Продюсер Kafka на практике]]"
+topic:
+  partitions: 1
+  replication: 3
+  configs:
+    min.insync.replicas: 1
+producer:
+  acks: 1
+  rate: 200
+  seconds: 8
+observers: [read_committed]
+settle_seconds: 40
+faults:
+  # Цель разрешается в момент сбоя; обрыв короче 10 с, фолловеры ещё в ISR, когда лидер падает.
+  - at: 1
+    cut: followers(p0)
+    peer: leader(p0)
+  - at: 5
+    kill: leader(p0)
